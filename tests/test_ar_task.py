@@ -724,7 +724,7 @@ def test_paper_state_defaults_to_cursor_reviewer_panel() -> None:
     assert ar.CURSOR_REVIEWER_MODELS == (
         "gpt-5.6-sol-max-fast",
         "claude-fable-5-thinking-max",
-        "cursor-grok-4.5-high-fast",
+        "kimi-k3-max",
     )
 
 
@@ -740,7 +740,7 @@ def test_cursor_reviewer_panel_reads_only_isolated_pdf(
     ratings = {
         "gpt-5.6-sol-max-fast": (4, "weak reject"),
         "claude-fable-5-thinking-max": (6, "borderline"),
-        "cursor-grok-4.5-high-fast": (8, "weak accept"),
+        "kimi-k3-max": (8, "weak accept"),
     }
     review_commands: list[list[str]] = []
 
@@ -1059,7 +1059,7 @@ def test_plateau_keeps_fixed_panel_then_pauses_for_human() -> None:
     assert ar.CURSOR_REVIEWER_MODELS == (
         "gpt-5.6-sol-max-fast",
         "claude-fable-5-thinking-max",
-        "cursor-grok-4.5-high-fast",
+        "kimi-k3-max",
     )
 
     improved = _with_reviews(4, 4, 4, 5)

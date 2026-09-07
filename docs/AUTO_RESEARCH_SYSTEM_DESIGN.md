@@ -114,7 +114,7 @@ flowchart TB
    各章节实质完整；page-one 总览图必须存在；所有被引用的图文件存在；引用无悬空。
    不合格 → 列出失败清单原样打回 Author，本轮重做，不消耗评审。
 3. **Reviewer Panel（三模型）**：`gpt-5.6-sol-max-fast` + `claude-fable-5-thinking-max` +
-   `cursor-grok-4.5-high-fast` 并行、独立地**只读编译后的 PDF**（隔离临时目录，看不到源码
+   `kimi-k3-max` 并行、独立地**只读编译后的 PDF**（隔离临时目录，看不到源码
    和作者笔记，模拟真实审稿）。产出结构化分数（soundness/presentation/contribution/rating），
    **取最低分作为本轮定论**（防止单模型放水）。
 4. **停止判定（代码）**：rating 达到 `stop_rating`（默认 8）/ 跑满 `max_rounds`（默认 10）/

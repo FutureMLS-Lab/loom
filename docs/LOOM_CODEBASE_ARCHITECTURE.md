@@ -708,7 +708,7 @@ Reviewer 是 Headless Cursor 子进程，不在 Author 的 tmux pane 中。
 ```text
 gpt-5.6-sol-max-fast
 claude-fable-5-thinking-max
-cursor-grok-4.5-high-fast
+kimi-k3-max
 ```
 
 三个 Reviewer：
@@ -1699,7 +1699,7 @@ rounds/round-NN/readiness.md
 ```text
 gpt-5.6-sol-max-fast
 claude-fable-5-thinking-max
-cursor-grok-4.5-high-fast
+kimi-k3-max
 ```
 
 运行方式：
@@ -1720,7 +1720,7 @@ Controller
 rounds/round-NN/review.md
 rounds/round-NN/review-gpt-5.6-sol-max-fast.md
 rounds/round-NN/review-claude-fable-5-thinking-max.md
-rounds/round-NN/review-cursor-grok-4.5-high-fast.md
+rounds/round-NN/review-kimi-k3-max.md
 ```
 
 最终评分策略：

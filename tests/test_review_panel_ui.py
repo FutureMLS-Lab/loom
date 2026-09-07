@@ -41,7 +41,7 @@ def test_review_payload_reads_three_persisted_model_reports(tmp_path: Path) -> N
     reviewers = [
         _review("gpt-5.6-sol-max-fast", 6, "borderline"),
         _review("claude-fable-5-thinking-max", 4, "weak reject"),
-        _review("cursor-grok-4.5-high-fast", 7, "weak accept"),
+        _review("kimi-k3-max", 7, "weak accept"),
     ]
     stored = web._ar_store_panel_reviews(root, slug, 1, reviewers)
     combined = "\n\n---\n\n".join(

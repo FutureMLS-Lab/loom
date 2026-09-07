@@ -122,16 +122,16 @@ BACKGROUND_FIT_MODE_OPTIONS = (
 BACKGROUND_FIT_MODES = frozenset(x["id"] for x in BACKGROUND_FIT_MODE_OPTIONS)
 DEFAULT_BACKGROUND_FIT_MODE = "balanced"
 
-# Prefer Fast variants whenever Cursor exposes one for the requested reviewer
-# family. Fable Thinking Max currently has no Fast sibling in the account
-# catalogue, so it remains on the strongest available non-fast variant.
-# Fable has an explicit Thinking variant. GPT-5.6 Sol and Cursor Grok do not
-# expose a separate Thinking switch; max/high is their strongest reasoning
-# preset, and Cursor intentionally suppresses private reasoning in print mode.
+# Three independent model families so the panel does not share one vendor's
+# blind spots: OpenAI GPT-5.6, Anthropic Claude (Fable), and Moonshot Kimi.
+# Each is pinned to its strongest reasoning preset (max/thinking-max). We
+# deliberately avoid Cursor's own Grok here - its pinned build churns (grok
+# 4.5 was retired for 4.6 and broke the panel), and vendor diversity matters
+# more than any one model. Prefer Fast variants when Cursor exposes one.
 CURSOR_REVIEWER_MODELS: tuple[str, ...] = (
     "gpt-5.6-sol-max-fast",
     "claude-fable-5-thinking-max",
-    "cursor-grok-4.5-high-fast",
+    "kimi-k3-max",
 )
 CURSOR_REVIEWER_PANEL = "cursor-reviewer-panel"
 

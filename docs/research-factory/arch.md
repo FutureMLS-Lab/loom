@@ -144,9 +144,9 @@ PDF 验收。R&R 的一页 rebuttal 仍由 delivery 技能负责。
 2. **Readiness Gate**（确定性，`review_readiness`）：编译干净、无占位符/TODO/`??`、
    章节实质完整、page-one 总览图存在、引用图文件齐全、无悬空引用。
    失败清单原样打回 Author 重做（`readiness_attempts`），不消耗评审。
-3. **Reviewer Panel**（`run_reviewer`）：三个 Cursor 模型
+3. **Reviewer Panel**（`run_reviewer`）：三个跨厂商模型
    （`CURSOR_REVIEWER_MODELS`：GPT-5.6 Sol Max Fast / Fable 5 Thinking Max /
-   Grok 4.5 High Fast）并行、只读隔离目录中的编译 PDF，产出结构化分数，
+   Kimi K3 Max）并行、只读隔离目录中的编译 PDF,产出结构化分数,
    **最低分定档**（`deciding_model`）。
 4. **停止判定**：达到 `stop_rating`（默认 8）/ 跑满 `max_rounds` / 平台期
    （连续两轮结构性修复无提升）→ Final Human Gate。
