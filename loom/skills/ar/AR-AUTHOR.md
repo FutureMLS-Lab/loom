@@ -15,6 +15,23 @@ project; a reviewer seeing `\ARnum{}` just tells you to go run the experiment.
 The same applies to citations: every `\cite` must be a paper that exists and
 that says what you claim it says. If you are unsure, look it up or drop it.
 
+## Experimental result tables
+
+Use a compact, publication-style presentation for experimental result tables:
+each metric cell must contain one measured point estimate only.
+Do not append confidence intervals, standard deviations, standard errors, or
+other uncertainty or spread statistics to table cells or captions, including
+`mean +/- ...`, `mean ± ...`, `x.xx (y.yy)`, or interval notation. This applies
+to main results, ablations, appendix and supplementary result tables, and
+tables copied from experiment aggregators.
+
+If raw results report uncertainty, retain only the measured point estimate in
+the manuscript-facing table; never alter it or invent a replacement. Preserve
+the full raw statistics in machine-readable experiment artifacts. A caption or
+experimental-setup paragraph may state the number of seeds and the evaluation
+protocol, but must not print the omitted uncertainty statistic. This policy
+concerns table presentation only; follow the relevant figure skill for plots.
+
 ## Layout
 
 Your pane starts in the task's `work/`, which holds two sibling git

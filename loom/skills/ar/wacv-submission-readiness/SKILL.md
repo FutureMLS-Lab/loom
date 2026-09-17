@@ -8,8 +8,8 @@ description: Prepare and validate anonymous WACV submissions. Use only when the 
 ## Scope
 
 This is a WACV-only venue skill. Apply `paper-results-reporting` separately for
-venue-independent statistics, interval placement, provenance, and normal
-submission-PDF naming.
+venue-independent point-estimate-only tables, interval placement, provenance,
+and normal submission-PDF naming.
 
 Rules and track names can change between cycles. Check the official call and
 author kit before final delivery. For WACV 2027, use the verified project rules
@@ -76,12 +76,14 @@ The general `paper-results-reporting` rule applies without exception:
 
 - abstract and body prose report point estimates rather than numeric interval
   endpoints;
-- main-paper tables may use `mean ± sample SD` but must not contain confidence-
-  interval columns or bracketed endpoint pairs;
-- captions and figure labels do not print interval endpoints;
+- every experimental-results table, including supplement and
+  aggregator-generated tables, shows one measured point estimate per metric
+  cell, with no confidence intervals, standard deviations, standard errors,
+  error bars, or other uncertainty/spread in cells or captions;
+- figure labels do not print interval endpoints;
 - full interval endpoints and additional uncertainty analysis belong in the
-  supplement's experiment-details portion or a separate experiment-details
-  artifact.
+  supplement's experiment-details prose or a separate experiment-details
+  artifact, not result-table cells or captions.
 
 Update generators and exporters as well as generated TeX, figures, and PDFs so
 a rebuild cannot restore forbidden interval text.
@@ -125,8 +127,9 @@ explicit package policy overrides the normal main-artifact filename.
    and References begins on page nine.
 5. Confirm the main PDF has no appendix section and the supplement builds
    independently.
-6. Scan source, rendered text, and figure pixels for numeric interval endpoints,
-   identity leaks, hashes, private paths, old IDs, and stale track labels.
+6. Confirm all result tables show point estimates only, then scan source,
+   rendered text, and figure pixels for numeric interval endpoints, identity
+   leaks, hashes, private paths, old IDs, and stale track labels.
 7. Visually inspect every main-paper page and every supplementary page.
 8. Recompute manifest sizes and checksums only after the final verified build.
 

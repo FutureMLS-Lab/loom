@@ -61,7 +61,7 @@ Loom ships exactly 20 skills - 5 pick-and-read, 15 Paper-Factory. This generated
 | AR-AUTHOR | Author | Writes the paper and runs the experiments behind it. | Injected in full into every author round prompt. | `loom/skills/ar/AR-AUTHOR.md` |
 | AR-REVIEWER | Reviewer | Reviews each round the way a venue would. | Injected in full into every reviewer run. | `loom/skills/ar/AR-REVIEWER.md` |
 | paper-rebuttal | Rebuttal | Drafts acceptance-oriented, evidence-bounded responses to reviewers. | Named in every author round prompt; the author reads it before answering the reviewers. | `loom/skills/ar/paper-rebuttal/SKILL.md` |
-| paper-results-reporting | Author | Standardizes result-table statistics and manuscript-safe provenance. | Injected in full into every author prompt. | `loom/skills/ar/paper-results-reporting/SKILL.md` |
+| paper-results-reporting | Author | Enforces point-estimate-only result tables and manuscript-safe provenance. | Injected in full into every author prompt. | `loom/skills/ar/paper-results-reporting/SKILL.md` |
 | paper-ai-tone | Author | Strips the AI accent from paper prose: tone, narrative spine, notation, claims and citation hygiene. | Injected in full into every author prompt. | `loom/skills/ar/paper-ai-tone/SKILL.md` |
 | wsdm-submission-readiness | Author | Packages anonymous WSDM papers under ACM and nine-page rules. | Injected in full only into WSDM author prompts. | `loom/skills/ar/wsdm-submission-readiness/SKILL.md` |
 | wacv-submission-readiness | Author | Packages anonymous WACV papers under track and eight-page rules. | Injected in full only into WACV author prompts. | `loom/skills/ar/wacv-submission-readiness/SKILL.md` |
