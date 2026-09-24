@@ -52,6 +52,12 @@ the web console, loom-desktop, loom-app, OpenClaw agents, and your scripts.
 | `POST` | `/api/tasks/<slug>/review` `{path, rules?}` | AI review of the diff vs rules / skills |
 | `GET`/`POST`/`DELETE` | `/api/tasks/<slug>/monitor` | Run-monitor status / enable / disable |
 
+For an existing-paper Author task, set `kind: "author"` and include
+`author_manuscript_repo`, optional `author_experiment_repo`, `author_venue`,
+and `author_main_tex` (relative to the manuscript repository). Both repository
+paths must name git roots on the Loom host. The response is the normal task
+metadata; `GET /api/tasks/<slug>` also includes the persisted `author` config.
+
 ### Agent pane
 
 | Method | URL | Purpose |
@@ -201,6 +207,7 @@ revision (before the burial commit on 2026-08-25).
     ├── task.json         # title, goal, agent, skills, worktrees, sessions
     ├── PLAN.md           # done / results / to-do
     ├── monitor.json      # run-monitor state (only if used)
+    ├── author.json       # existing-paper repositories / venue (Author tasks)
     ├── ar.json           # only for Factory (AR) tasks
     ├── rounds/round-NN/  # author notes, readiness reports, panel reviews
     └── work/<repo>/…     # git worktree, branch loom/<slug>

@@ -26,6 +26,27 @@ from loom.web_util import (
 )
 
 
+def _configure_stream_socket(connection) -> None:
+    """Apply best-effort TCP keepalive settings across Linux and macOS."""
+    try:
+        connection.setsockopt(socket.SOL_SOCKET, socket.SO_KEEPALIVE, 1)
+        idle_option = getattr(socket, "TCP_KEEPIDLE", None)
+        if idle_option is None:
+            # Darwin exposes the equivalent option as TCP_KEEPALIVE.
+            idle_option = getattr(socket, "TCP_KEEPALIVE", None)
+        if idle_option is not None:
+            connection.setsockopt(socket.IPPROTO_TCP, idle_option, 30)
+        for option_name, value in (("TCP_KEEPINTVL", 10), ("TCP_KEEPCNT", 3)):
+            option = getattr(socket, option_name, None)
+            if option is not None:
+                connection.setsockopt(socket.IPPROTO_TCP, option, value)
+        connection.settimeout(60)
+    except OSError:
+        # Keepalive tuning is an optimisation; streaming must still work on
+        # kernels that reject one of these socket options.
+        pass
+
+
 def handle_get(self, path, parsed) -> bool:  # noqa: C901
     if path == "/api/tmux/sessions":
         qs = parse_qs(parsed.query or "")
@@ -96,14 +117,7 @@ def handle_get(self, path, parsed) -> bool:  # noqa: C901
         # kernel's full retransmission timeout - tens of minutes.
         # Aggressive keepalive turns that into ~a minute, and a send
         # timeout stops a flooding pane from blocking on a dead peer.
-        try:
-            self.connection.setsockopt(socket.SOL_SOCKET, socket.SO_KEEPALIVE, 1)
-            self.connection.setsockopt(socket.IPPROTO_TCP, socket.TCP_KEEPIDLE, 30)
-            self.connection.setsockopt(socket.IPPROTO_TCP, socket.TCP_KEEPINTVL, 10)
-            self.connection.setsockopt(socket.IPPROTO_TCP, socket.TCP_KEEPCNT, 3)
-            self.connection.settimeout(60)
-        except OSError:
-            pass
+        _configure_stream_socket(self.connection)
         try:
             self.send_response(200)
             self.send_header("Content-Type", "application/octet-stream")

@@ -39,6 +39,7 @@ function normalizeAgent(name) { return AGENT_LABELS[(name || '').toLowerCase()] 
 function taskBackendLabel(meta) {
   meta = meta || {};
   const base = `${agentLabel(meta.agent)}${meta.interview_model ? ' · ' + meta.interview_model : ''}`;
+  if (isAuthorKind(meta.kind)) return `Author · ${base}`;
   return isArKind(meta.kind) ? `AR · ${base}` : base;
 }
 
@@ -47,6 +48,7 @@ function isArKind(kind) {
   const k = String(kind || '').toLowerCase();
   return k === 'ar' || k === 'aris';
 }
+function isAuthorKind(kind) { return String(kind || '').toLowerCase() === 'author'; }
 
 // Lightweight non-blocking toast (replaces jarring native alert() for transient
 // errors/notices). Stacks bottom-right, auto-dismisses; aria-live for SR users.
@@ -1519,7 +1521,7 @@ function renderTasksFromState() {
     li.tabIndex = 0;
     li.title = `${t.slug} · ${taskBackendLabel(t)}`;
     if (t.slug === selected) li.classList.add('active');
-    const typeLabel = isArKind(t.kind) ? 'AR' : agentLabel(t.agent);
+    const typeLabel = isArKind(t.kind) ? 'AR' : (isAuthorKind(t.kind) ? 'Author' : agentLabel(t.agent));
     const kindClass = isArKind(t.kind) ? 'ar' : (t.kind || 'agent');
     li.innerHTML =
       `<div class="task-title-row"><span class="task-title">${escapeHtml(t.title)}</span>` +
@@ -3119,6 +3121,7 @@ const AGENT_HINTS = {
   cursor: 'Cursor Agent pane (agent CLI). Resume a past chat by chat ID.',
   claude: 'Claude Code pane. Resume a past session by UUID.',
   codex: 'Codex CLI pane. Resume with codex resume <id>.',
+  author: 'Existing-paper Author: one Cursor Agent with isolated manuscript and experiment worktrees plus paper-writing skills.',
   ar: 'Automated research: mine a direction for ideas, then each idea you pick becomes a task that drafts a paper, runs its experiments, and iterates against a reviewer agent.',
 };
 
@@ -3237,7 +3240,14 @@ function updateCreateAgentHint(resetModel = false) {
     effectiveCreateAgent(),
     resetModel ? null : (input?.value || null),
   );
+  updateAuthorCreateFields();
   updateArCreateFields();
+}
+
+function updateAuthorCreateFields() {
+  const wrap = document.getElementById('author-create-fields');
+  if (!wrap) return;
+  wrap.hidden = document.getElementById('new-agent-select')?.value !== 'author';
 }
 
 // The AR-only half of the create form: direction, venue, mode and rounds.
@@ -3318,6 +3328,14 @@ function resetCreateForm() {
   if (seed) seed.value = '';
   const custom = document.getElementById('ar-custom-direction');
   if (custom) custom.value = '';
+  const authorVenue = document.getElementById('author-venue');
+  if (authorVenue) authorVenue.value = 'iclr';
+  const authorTex = document.getElementById('author-main-tex');
+  if (authorTex) authorTex.value = 'main.tex';
+  const authorManuscript = document.getElementById('author-manuscript-repo');
+  if (authorManuscript) authorManuscript.value = '';
+  const authorExperiments = document.getElementById('author-experiment-repo');
+  if (authorExperiments) authorExperiments.value = '';
   updateCreateAgentHint(true);
 }
 
@@ -4722,13 +4740,25 @@ document.getElementById('btn-new-task').addEventListener('click', async () => {
   btn.disabled = true;
   status.textContent = 'Creating…';
   try {
-    const special = agent === 'ar';
+    const special = agent === 'ar' || agent === 'author';
     const body = {
       title,
       general_goal,
       agent: special ? 'cursor' : agent,
       interview_model: interviewModel,
     };
+    if (agent === 'author') {
+      body.kind = 'author';
+      body.author_venue = $('#author-venue')?.value.trim() || '';
+      body.author_main_tex = $('#author-main-tex')?.value.trim() || 'main.tex';
+      body.author_manuscript_repo = $('#author-manuscript-repo')?.value.trim() || '';
+      body.author_experiment_repo = $('#author-experiment-repo')?.value.trim() || '';
+      if (!body.author_venue || !body.author_manuscript_repo) {
+        status.textContent = 'Target venue and manuscript repository are required.';
+        btn.disabled = false;
+        return;
+      }
+    }
     if (agent === 'ar') {
       body.kind = 'ar';
       body.ar_direction = $('#ar-direction')?.value || '';

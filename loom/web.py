@@ -37,6 +37,7 @@ from typing import Any
 from urllib.parse import parse_qs, urlparse
 
 from loom import agent_hooks
+from loom import author_task as author
 from loom import researcher_profile as researcher_profiles
 from loom.web_jobs import (
     ARLoopManager,
@@ -464,7 +465,11 @@ def _build_claude_prompt(
     wt = task_worktree_path(project_root, slug)
     wt_line = f"Worktree (branch {meta.branch or '(unset)'}): {wt}" if wt else "Worktree: (none)"
     # meta.skills_path may name several ;-joined skills files - inject them all.
-    skills = load_skills_text(meta.skills_path, default_skills)
+    skills = load_skills_text(
+        meta.skills_path,
+        default_skills,
+        limit_total=45000 if meta.kind == author.KIND_AUTHOR else 30000,
+    )
     state_doc = PLAN
     plan_path = td / state_doc
     if ar.is_ar_kind(meta.kind):
@@ -2002,6 +2007,11 @@ def make_handler(
                         "task_markdown_files": md_names,
                         "claude": summary or {},
                         "worktree_statuses": statuses,
+                        "author": (
+                            author.read_state(root, slug)
+                            if meta.kind == author.KIND_AUTHOR
+                            else {}
+                        ),
                         # Tasks carry absolute skill paths, so one moved or
                         # renamed checkout leaves them pointing at nothing.
                         # The prompt silently falls back to the default; tell
@@ -2081,10 +2091,26 @@ def make_handler(
                     return
                 title = str(body.get("title", "")).strip()
                 general_goal = str(body.get("general_goal", "")).strip()
-                kind = {"ar": ar.KIND_AR, "aris": ar.KIND_AR}.get(
-                    str(body.get("kind", "")).strip().lower(), "agent"
-                )
+                raw_kind = str(body.get("kind", "")).strip().lower()
+                kind = {
+                    "ar": ar.KIND_AR,
+                    "aris": ar.KIND_AR,
+                    author.KIND_AUTHOR: author.KIND_AUTHOR,
+                }.get(raw_kind, "agent")
                 ar_state: dict[str, Any] | None = None
+                author_config: dict[str, str] | None = None
+                if kind == author.KIND_AUTHOR:
+                    try:
+                        author_config = author.normalize_config(
+                            manuscript_repo=str(body.get("author_manuscript_repo", "")),
+                            experiment_repo=str(body.get("author_experiment_repo", "")),
+                            venue=str(body.get("author_venue", "")),
+                            main_tex=str(body.get("author_main_tex", "main.tex")),
+                        )
+                    except ValueError as exc:
+                        st, b, h = _json_bytes({"error": str(exc)}, 400)
+                        self._send(st, b, h)
+                        return
                 if kind == ar.KIND_AR:
                     venue_url = str(body.get("ar_venue_url", "")).strip()
                     if venue_url and not venue_url.startswith(("http://", "https://")):
@@ -2187,19 +2213,38 @@ def make_handler(
                     )
                     self._send(st, b, h)
                     return
-                meta = create_task(
-                    root,
-                    title,
-                    general_goal,
-                    skills_path=skills_path,
-                    interview_model=(
-                        str(body.get("interview_model", "")).strip()
-                        or agent_default_model(raw_agent or AGENT_CURSOR)
-                    ),
-                    agent=raw_agent or AGENT_CURSOR,
-                    kind=kind,
-                    auto_worktree=False,
+                interview_model = (
+                    str(body.get("interview_model", "")).strip()
+                    or agent_default_model(raw_agent or AGENT_CURSOR)
                 )
+                if author_config is not None:
+                    meta, author_error = author.create_existing_paper_task(
+                        root,
+                        title=title,
+                        user_goal=general_goal,
+                        config=author_config,
+                        selected_skills=skills_path,
+                        interview_model=interview_model,
+                        agent=raw_agent or AGENT_CURSOR,
+                    )
+                    if meta is None:
+                        st, b, h = _json_bytes(
+                            {"error": author_error or "could not create Author task"},
+                            400,
+                        )
+                        self._send(st, b, h)
+                        return
+                else:
+                    meta = create_task(
+                        root,
+                        title,
+                        general_goal,
+                        skills_path=skills_path,
+                        interview_model=interview_model,
+                        agent=raw_agent or AGENT_CURSOR,
+                        kind=kind,
+                        auto_worktree=False,
+                    )
                 if ar_state is not None:
                     ar.write_ar_state(root, meta.slug, ar_state)
                 code_root = pr.get_code_root(project_id) or root
@@ -2207,6 +2252,10 @@ def make_handler(
                     # A studio only mines and spawns; it has no code of its own,
                     # so a worktree of the project would sit there unused.
                     wt, _branch, auto_msg = None, "", "AR studio: no worktree needed"
+                elif author_config is not None:
+                    wt = Path(meta.worktree_path) if meta.worktree_path else None
+                    _branch = meta.branch
+                    auto_msg = "existing manuscript and experiment worktrees created"
                 else:
                     wt, _branch, auto_msg = prepare_task_worktree_from(
                         root, meta.slug, code_root

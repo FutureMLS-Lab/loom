@@ -1,8 +1,34 @@
 import os
+import socket
 from pathlib import Path
 
+import loom.routes_tmux as routes_tmux
 import loom.web as web
 from loom.web import _TerminalStreamRegistry
+
+
+class _FakeConnection:
+    def __init__(self) -> None:
+        self.options: list[tuple[int, int, int]] = []
+        self.timeout: int | None = None
+
+    def setsockopt(self, level: int, option: int, value: int) -> None:
+        self.options.append((level, option, value))
+
+    def settimeout(self, value: int) -> None:
+        self.timeout = value
+
+
+def test_terminal_stream_socket_uses_darwin_keepalive_fallback(monkeypatch) -> None:
+    monkeypatch.delattr(routes_tmux.socket, "TCP_KEEPIDLE", raising=False)
+    monkeypatch.setattr(routes_tmux.socket, "TCP_KEEPALIVE", 0x10, raising=False)
+    connection = _FakeConnection()
+
+    routes_tmux._configure_stream_socket(connection)
+
+    assert (socket.SOL_SOCKET, socket.SO_KEEPALIVE, 1) in connection.options
+    assert (socket.IPPROTO_TCP, 0x10, 30) in connection.options
+    assert connection.timeout == 60
 
 
 def test_terminal_stream_routes_input_to_registered_pty() -> None:

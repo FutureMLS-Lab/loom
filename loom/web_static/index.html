@@ -338,9 +338,28 @@
           <option value="cursor">Cursor Agent — agent CLI, resume by chat ID</option>
           <option value="claude">Claude — claude CLI, resume by UUID</option>
           <option value="codex">Codex — codex CLI, codex resume &lt;id&gt;</option>
+          <option value="author">Author — finish an existing paper and its experiments</option>
           <option value="ar">AR — automated research (paper pipeline)</option>
         </select>
         <p class="create-agent-hint" id="new-agent-hint"></p>
+
+        <div class="ar-create" id="author-create-fields" hidden>
+          <div class="ar-create__row">
+            <div>
+              <label for="author-venue">Target venue</label>
+              <input type="text" id="author-venue" class="modal-input-wide" value="iclr" placeholder="e.g. iclr, neurips, wacv" />
+            </div>
+            <div>
+              <label for="author-main-tex">Main TeX file</label>
+              <input type="text" id="author-main-tex" class="modal-input-wide" value="main.tex" placeholder="main.tex" spellcheck="false" />
+            </div>
+          </div>
+          <label for="author-manuscript-repo">Manuscript git repository on this Loom host</label>
+          <input type="text" id="author-manuscript-repo" class="modal-input-wide" placeholder="/data/projects/my-paper" spellcheck="false" />
+          <label for="author-experiment-repo">Experiment git repository (optional)</label>
+          <input type="text" id="author-experiment-repo" class="modal-input-wide" placeholder="/data/projects/my-experiments" spellcheck="false" />
+          <p class="skills-note">Loom creates isolated worktrees for these existing repositories and automatically adds the Author, results-reporting, prose, and available venue-readiness skills.</p>
+        </div>
 
         <div class="ar-create" id="ar-create-fields" hidden>
           <div class="ar-create__row">

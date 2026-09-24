@@ -41,6 +41,16 @@ The interview fills `PLAN.md` (goal, an empty results table, a to-do list);
 `/goal` executes it; the Changes tab shows the diff; **Push** or **Merge ↩**
 when you like what you see. Loom never commits or pushes on its own.
 
+### Finish an existing paper
+
+Choose **Author — finish an existing paper** in the Create Task dialog. Give
+Loom the host-local git repository containing the manuscript, an optional
+experiment repository, the target venue, and the main `.tex` file. Loom makes
+isolated worktrees for both repositories and combines the built-in Author,
+results-reporting, prose, and available venue-readiness skills. This is an
+ordinary interactive task: use the deep interview and `/goal`, then send its
+compiled PDF to the Review Factory when it is ready for independent review.
+
 ## Three clients, one server
 
 | Client | What it is |

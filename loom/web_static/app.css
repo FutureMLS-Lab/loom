@@ -292,6 +292,7 @@ select:focus-visible { outline: none; border-color: var(--border-focus); box-sha
 }
 .task-kind--ar,
 .task-kind--aris { color: #047857; background: #ecfdf5; border-color: #a7f3d0; }
+.task-kind--author { color: #92400e; background: #fffbeb; border-color: #fde68a; }
 
 /* Project switcher (toggle bar under topbar) */
 .project-bar {
