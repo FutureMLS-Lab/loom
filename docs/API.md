@@ -65,9 +65,10 @@ metadata; `GET /api/tasks/<slug>` also includes the persisted `author` config.
 | `POST` | `/api/tasks/<slug>/claude/start` | Launch the agent CLI in a tmux pane |
 | `POST` | `/api/tasks/<slug>/claude/stop` | Kill the pane (sessions stay resumable) |
 | `POST` | `/api/tasks/<slug>/claude/paste-prompt` | Re-paste the deep-interview prompt |
-| `POST` | `/api/tasks/<slug>/claude/send` `{text, submit?}` | Type a message into the pane — the OpenClaw reply path |
-| `POST` | `/api/tasks/<slug>/claude/resume` `{session_id}` | Fresh tmux, `--resume <id>` |
-| `GET` | `/api/tasks/<slug>/claude-sessions` | Tracked session ids + transcripts |
+| `POST` | `/api/tasks/<slug>/claude/send` `{text, submit?, rotate_context?}` | Type a message into the pane — the OpenClaw reply path. Returns `409 context_budget_exceeded` after a transcript, live-context, or per-turn budget trip unless `rotate_context` requests a fresh-session handoff. |
+| `POST` | `/api/tasks/<slug>/claude/rotate` `{paste_prompt?}` | Stop the current pane, start a clean non-resumed session, and by default reload the task prompt/`PLAN.md`. |
+| `POST` | `/api/tasks/<slug>/claude/resume` `{session_id, allow_oversize?}` | Fresh tmux, `--resume <id>`; oversized history requires explicit opt-in. |
+| `GET` | `/api/tasks/<slug>/claude-sessions` | Tracked session ids, logical transcript footprint, estimated tokens, soft-warning threshold, hard budget and status. |
 | `GET` | `/api/tasks/<slug>/conversation` | Parsed transcript of the newest session |
 
 `/api/tasks/<slug>/interview/{start,stop,paste-prompt}` are aliases kept for

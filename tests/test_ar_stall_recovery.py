@@ -14,6 +14,7 @@ class FakeManager:
     def __init__(self, alive: bool) -> None:
         self.alive = alive
         self.events: list[str] = []
+        self.rotations = 0
         self.openclaw = self
 
     def pane_alive(self, target: str) -> bool:
@@ -21,6 +22,13 @@ class FakeManager:
 
     def emit(self, event: str, **kwargs) -> None:
         self.events.append(event)
+
+    def rotate_pane(self, project_root, project_id, slug):
+        self.rotations += 1
+        return {"ok": True, "target": "loom-cursor-x:0.0"}
+
+    def wait_until_ready(self, target: str) -> None:
+        return None
 
 
 def make_paper(tmp_path: Path, slug: str = "paper-x") -> Path:
@@ -134,3 +142,25 @@ def test_a_nudge_that_produced_work_resets_the_cap(tmp_path, monkeypatch):
     saved = ar.read_ar_state(tmp_path, slug)["rounds"][0]
     assert saved["nudges"] == 1
     assert "stall_reported" not in saved
+
+
+def test_new_round_rotates_context_once_before_prompt(tmp_path, monkeypatch):
+    slug = "paper-x"
+    task = make_paper(tmp_path, slug)
+    state = ar.read_ar_state(tmp_path, slug)
+    state["rounds"][0]["prompt_sent_at"] = ""
+    ar.write_ar_state(tmp_path, slug, state)
+    sent: list[str] = []
+    monkeypatch.setattr(
+        web, "send_pane_text", lambda t, p, submit: (sent.append(p), (True, ""))[1]
+    )
+    manager = FakeManager(alive=True)
+    driver = _ARLoopDriver(manager, tmp_path, "pid1", slug)
+
+    driver._send_round_prompt(ar.read_ar_state(tmp_path, slug), 1)
+
+    assert manager.rotations == 1
+    assert len(sent) == 1
+    saved = ar.read_ar_state(tmp_path, slug)["rounds"][0]
+    assert saved["fresh_session_started_at"]
+    assert saved["prompt_sent_at"]

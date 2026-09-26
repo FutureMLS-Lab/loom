@@ -105,6 +105,7 @@ const STATE = {
   sidebarOpen: false,
   activity: null,
   activityTimer: null,
+  budgetStopsSeen: {},
   notesDirty: false,
   notesSaving: false,
   taskFilter: '',
@@ -316,6 +317,15 @@ function applyActivity() {
   if (!data) return;
   const tasks = data.tasks || {};
   const projects = data.projects || {};
+
+  Object.entries(tasks).forEach(([key, entry]) => {
+    const stop = entry && entry.budget_stop;
+    const stamp = stop && stop.stopped_at;
+    if (!stamp || STATE.budgetStopsSeen[key] === stamp) return;
+    STATE.budgetStopsSeen[key] = stamp;
+    const reason = stop.reason || 'the configured usage limit was reached';
+    toast(`Loom paused ${entry.slug}: ${reason}. Edits were preserved; the next message will use a fresh session.`, { ttl: 9000 });
+  });
 
   document.querySelectorAll('#task-list li[data-slug]').forEach((li) => {
     const entry = tasks[`${STATE.projectId}/${li.dataset.slug}`];
@@ -3045,10 +3055,7 @@ async function sendWorkflowPrompt(kind, text) {
   }
   try {
     setTmuxOutputText(`Sending workflow prompt: ${kind}…`);
-    await api('/api/tmux/send-text', {
-      method: 'POST',
-      body: JSON.stringify({ target, text, submit: true }),
-    });
+    await sendTaskMessage(text);
     setTimeout(() => refreshInterviewPreview(true), 500);
     setTimeout(() => refreshTaskTemplates(), 1800);
   } catch (err) {
@@ -4204,6 +4211,13 @@ function shortSessionId(sid) {
   return s.slice(0, 8);
 }
 
+function formatContextBytes(bytes) {
+  const n = Number(bytes || 0);
+  if (!n) return '0 KB';
+  if (n >= 1024 * 1024) return `${(n / (1024 * 1024)).toFixed(1)} MB`;
+  return `${Math.max(1, Math.round(n / 1024))} KB`;
+}
+
 // Build the worktree rows (path + branch + status + push/remove) into
 // *wtHost*, and toggle *pushAllBtn* visibility.
 function renderWorktreeListInto(wtHost, pushAllBtn, meta, statuses, primaryLabel) {
@@ -4308,7 +4322,7 @@ function renderClaudeInfo(meta, claude, statuses) {
   // dropdown shut under the user's pointer and resets their selection.
   const fp = JSON.stringify([
     STATE.currentMeta?.agent, running, claude.pane_command || '',
-    sessions.map((s) => [s.id, s.mtime, s.size, s.path ? 1 : 0]),
+    sessions.map((s) => [s.id, s.mtime, s.size, s.near_budget, s.over_budget, s.path ? 1 : 0]),
   ]);
   if (sessHost.dataset.fp === fp) return;
   sessHost.dataset.fp = fp;
@@ -4335,7 +4349,9 @@ function renderClaudeInfo(meta, claude, statuses) {
     opt.value = s.id || '';
     const bits = [shortSessionId(s.id)];
     if (s.mtime) bits.push(formatSessionMtime(s.mtime));
-    if (s.size) bits.push(`${Math.max(1, Math.round(s.size / 1024))} KB`);
+    if (s.size) bits.push(formatContextBytes(s.size));
+    if (s.near_budget) bits.push('CONTEXT GROWING');
+    if (s.over_budget) bits.push('OVER CONTEXT BUDGET');
     if (!s.path) bits.push('no transcript');
     opt.textContent = bits.join(' · ');
     opt.title = s.id || '';
@@ -4356,6 +4372,14 @@ function renderClaudeInfo(meta, claude, statuses) {
     : 'Resume the selected session in a fresh or idle tmux pane.';
   resume.addEventListener('click', () => { if (sel.value) resumeClaudeSession(sel.value); });
   row.appendChild(resume);
+
+  const fresh = document.createElement('button');
+  fresh.type = 'button';
+  fresh.className = 'btn btn--sm session-picker__fresh';
+  fresh.textContent = 'New session';
+  fresh.title = 'Start a clean session and reload task state from PLAN.md.';
+  fresh.addEventListener('click', rotateClaudeSession);
+  row.appendChild(fresh);
 
   sessHost.appendChild(row);
 }
@@ -4580,10 +4604,24 @@ async function resumeClaudeSession(sessionId) {
   if (!STATE.slug || !sessionId) return;
   if (!confirm(`Resume Claude session ${sessionId} in a fresh or idle tmux pane?`)) return;
   try {
-    const r = await api('/api/tasks/' + encodeURIComponent(STATE.slug) + '/claude/resume', {
-      method: 'POST',
-      body: JSON.stringify({ session_id: sessionId }),
-    });
+    let r;
+    try {
+      r = await api('/api/tasks/' + encodeURIComponent(STATE.slug) + '/claude/resume', {
+        method: 'POST',
+        body: JSON.stringify({ session_id: sessionId }),
+      });
+    } catch (err) {
+      if (err?.body?.code !== 'context_budget_exceeded') throw err;
+      const s = err.body.session || {};
+      const warning = `This history is ${formatContextBytes(s.size)} and exceeds the ` +
+        `${formatContextBytes(s.budget_bytes)} context budget. Resuming it can be very expensive.\n\n` +
+        'Choose Cancel and use New session unless the old chat itself is essential. Resume anyway?';
+      if (!confirm(warning)) return;
+      r = await api('/api/tasks/' + encodeURIComponent(STATE.slug) + '/claude/resume', {
+        method: 'POST',
+        body: JSON.stringify({ session_id: sessionId, allow_oversize: true }),
+      });
+    }
     if (!r.ok) throw new Error(r.error || 'resume failed');
     $('#inp-interview-target').value = r.target || '';
     setTmuxOutputText(`Resuming Claude session ${sessionId}\nNew tmux target: ${r.target || '(pending)'}`);
@@ -4591,6 +4629,47 @@ async function resumeClaudeSession(sessionId) {
     await refreshClaudeSessions();
   } catch (err) {
     toast(err.message || 'resume failed', { type: 'error' });
+  }
+}
+
+async function rotateClaudeSession() {
+  if (!STATE.slug) return;
+  if (!confirm('Start a clean agent session? Loom will reload task state from PLAN.md and stop the current pane.')) return;
+  try {
+    const r = await api('/api/tasks/' + encodeURIComponent(STATE.slug) + '/claude/rotate', {
+      method: 'POST',
+      body: JSON.stringify({ paste_prompt: true }),
+    });
+    $('#inp-interview-target').value = r.target || '';
+    setTmuxOutputText('Started a fresh context window and reloaded task state from PLAN.md.');
+    await refreshInterviewPreview(true);
+    await refreshClaudeSessions();
+  } catch (err) {
+    toast(err.message || 'could not start a fresh session', { type: 'error' });
+  }
+}
+
+async function sendTaskMessage(text) {
+  const endpoint = '/api/tasks/' + encodeURIComponent(STATE.slug) + '/claude/send';
+  try {
+    return await api(endpoint, {
+      method: 'POST',
+      body: JSON.stringify({ text, submit: true }),
+    });
+  } catch (err) {
+    if (err?.body?.code !== 'context_budget_exceeded') throw err;
+    const s = err.body.context?.session || {};
+    const live = err.body.context?.live_usage || {};
+    const reason = err.body.context?.reason ||
+      `the transcript reached ${formatContextBytes(s.size)} of ${formatContextBytes(s.budget_bytes)}`;
+    const detail = live.turn_tokens ? ` Current turn: ${Number(live.turn_tokens).toLocaleString()} tokens.` : '';
+    const warning = `This session reached Loom's usage budget: ${reason}.${detail}\n\n` +
+      'Start a clean session, reload PLAN.md, and send this message there?';
+    if (!confirm(warning)) throw err;
+    return api(endpoint, {
+      method: 'POST',
+      body: JSON.stringify({ text, submit: true, rotate_context: true }),
+    });
   }
 }
 
@@ -4640,11 +4719,14 @@ document.getElementById('btn-changes-refresh').addEventListener('click', () => r
     if (key) STATE.composeDrafts[key] = '';
     autoGrow();
     try {
-      await api('/api/tmux/send-text', {
-        method: 'POST',
-        body: JSON.stringify({ target, text, submit: true }),
-      });
-    } catch (err) { console.debug('compose send failed', err); }
+      const result = await sendTaskMessage(text);
+      if (result?.target) $('#inp-interview-target').value = result.target;
+    } catch (err) {
+      input.value = text;
+      if (key) STATE.composeDrafts[key] = text;
+      autoGrow();
+      console.debug('compose send failed', err);
+    }
     termScheduleRefresh();
     input.focus();
   }

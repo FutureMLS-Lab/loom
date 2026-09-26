@@ -24,7 +24,12 @@ from loom.rud_task import (
     task_root,
     write_task_monitor,
 )
-from loom.tmux_util import capture_pane
+from loom.tmux_util import capture_pane, send_pane_key
+from loom.usage_budget import (
+    parse_pane_usage,
+    usage_budget_violation,
+    write_budget_marker,
+)
 from loom.web_projects import WebProjectRegistry
 
 # --- Per-task run monitor ---------------------------------------------------
@@ -203,11 +208,16 @@ class AgentActivityWatcher:
     CAPTURE_LINES = 40
     IDLE_CONFIRM = 8
 
-    def __init__(self, registry: WebProjectRegistry) -> None:
+    def __init__(
+        self,
+        registry: WebProjectRegistry,
+        openclaw_client: OpenClawClient | None = None,
+    ) -> None:
         self.registry = registry
+        self.openclaw = openclaw_client
         self._lock = threading.Lock()
         self._state: dict[tuple[str, str], dict[str, Any]] = {}
-        self._targets: list[tuple[str, str, str]] = []
+        self._targets: list[tuple[str, Path, str, str]] = []
         self._targets_at = 0.0
         self._stop = threading.Event()
         self.thread = threading.Thread(
@@ -220,9 +230,9 @@ class AgentActivityWatcher:
     def stop(self) -> None:
         self._stop.set()
 
-    def _scan_targets(self) -> list[tuple[str, str, str]]:
-        """(project_id, slug, tmux target) for every task with a pane."""
-        out: list[tuple[str, str, str]] = []
+    def _scan_targets(self) -> list[tuple[str, Path, str, str]]:
+        """(project_id, root, slug, tmux target) for every task with a pane."""
+        out: list[tuple[str, Path, str, str]] = []
         for project in self.registry.list_projects():
             pid, path = str(project.get("id") or ""), project.get("path")
             if not pid or not path:
@@ -234,8 +244,95 @@ class AgentActivityWatcher:
             for meta in metas:
                 target = (getattr(meta, "tmux_interview_target", "") or "").strip()
                 if target:
-                    out.append((pid, meta.slug, target))
+                    out.append((pid, Path(path), meta.slug, target))
         return out
+
+    def _observe_pane(
+        self,
+        project_id: str,
+        project_root: Path,
+        slug: str,
+        target: str,
+        text: str,
+        now: float,
+    ) -> None:
+        """Update activity state and interrupt a runaway live turn once."""
+        key = (project_id, slug)
+        working = bool(_AGENT_WORKING_RE.search(text or ""))
+        usage = parse_pane_usage(text)
+        violation = usage_budget_violation(usage) if working else ""
+        should_interrupt = False
+        with self._lock:
+            entry = self._state.setdefault(
+                key,
+                {
+                    "working": False,
+                    "idle_polls": 0,
+                    "finished_at": 0.0,
+                    "budget_interrupt_sent": False,
+                },
+            )
+            previous_tokens = int((entry.get("usage") or {}).get("turn_tokens") or 0)
+            # A new Cursor goal resets its displayed token counter. Treat that
+            # as a new turn even if the idle gap was shorter than our normal
+            # finish-confirmation window.
+            counter_reset = bool(
+                entry.get("budget_interrupt_sent")
+                and usage.get("turn_tokens")
+                and previous_tokens
+                and int(usage["turn_tokens"]) < previous_tokens // 2
+            )
+            if working and (not entry.get("working") or counter_reset):
+                entry["budget_interrupt_sent"] = False
+            entry["usage"] = usage
+            if working:
+                entry["working"] = True
+                entry["idle_polls"] = 0
+                entry["finished_at"] = 0.0
+                if violation and not entry.get("budget_interrupt_sent"):
+                    entry["budget_interrupt_sent"] = True
+                    should_interrupt = True
+            else:
+                entry["idle_polls"] = int(entry.get("idle_polls") or 0) + 1
+                if entry.get("working") and entry["idle_polls"] >= self.IDLE_CONFIRM:
+                    entry["working"] = False
+                    entry["finished_at"] = now
+
+        if not should_interrupt:
+            return
+        marker = write_budget_marker(
+            task_root(project_root, slug),
+            target=target,
+            reason=violation,
+            usage=usage,
+        )
+        ok, error = send_pane_key(target, "C-c")
+        marker["interrupt_ok"] = ok
+        if error:
+            marker["interrupt_error"] = error
+        with self._lock:
+            entry = self._state.get(key)
+            if entry is not None:
+                entry["budget_stop"] = marker
+        print(
+            f"[budget] {slug}: {'paused' if ok else 'could not pause'} agent - {violation}",
+            flush=True,
+        )
+        if ok and self.openclaw is not None:
+            try:
+                self.openclaw.emit(
+                    "agent-budget-stopped",
+                    instruction=(
+                        f"Loom paused task {slug} because {violation}. Worktree edits "
+                        "were preserved. Review the partial result, then continue in a "
+                        "fresh session from PLAN.md."
+                    ),
+                    project_root=project_root,
+                    task_slug=slug,
+                    data={"event": "agent-budget-stopped", **marker},
+                )
+            except Exception as exc:  # noqa: BLE001
+                print(f"[budget] {slug} emit error: {exc}", flush=True)
 
     def _loop(self) -> None:
         while not self._stop.is_set():
@@ -245,27 +342,15 @@ class AgentActivityWatcher:
                     self._targets = self._scan_targets()
                     self._targets_at = now
                 live = set()
-                for pid, slug, target in self._targets:
+                for pid, project_root, slug, target in self._targets:
                     key = (pid, slug)
                     live.add(key)
                     ok, text = capture_pane(target, self.CAPTURE_LINES)
                     if not ok:
                         continue
-                    working = bool(_AGENT_WORKING_RE.search(text or ""))
-                    with self._lock:
-                        entry = self._state.setdefault(
-                            key, {"working": False, "idle_polls": 0, "finished_at": 0.0}
-                        )
-                        if working:
-                            entry["working"] = True
-                            entry["idle_polls"] = 0
-                            # Working again supersedes an unread finish.
-                            entry["finished_at"] = 0.0
-                        else:
-                            entry["idle_polls"] += 1
-                            if entry["working"] and entry["idle_polls"] >= self.IDLE_CONFIRM:
-                                entry["working"] = False
-                                entry["finished_at"] = now
+                    self._observe_pane(
+                        pid, project_root, slug, target, text or "", now
+                    )
                 with self._lock:
                     for key in [k for k in self._state if k not in live]:
                         # Keep an unread finish that a stop hook reported: the
@@ -292,6 +377,8 @@ class AgentActivityWatcher:
                     "slug": slug,
                     "working": working,
                     "finished_at": finished,
+                    "usage": dict(entry.get("usage") or {}),
+                    "budget_stop": dict(entry.get("budget_stop") or {}),
                 }
                 if working or finished:
                     agg = projects.setdefault(pid, {"working": 0, "finished": 0})
@@ -449,5 +536,4 @@ class TaskMonitorManager:
                 except Exception:  # noqa: BLE001
                     continue
         return started
-
 

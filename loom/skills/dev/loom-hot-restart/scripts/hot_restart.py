@@ -95,16 +95,25 @@ def _option(argv: tuple[str, ...], name: str) -> str:
     return ""
 
 
+def _is_loom_web_argv(argv: tuple[str, ...]) -> bool:
+    """Recognize module, console-script, and Python console-script launches."""
+    if len(argv) >= 4 and argv[1:4] == ("-m", "loom", "web"):
+        return True
+    if len(argv) >= 2 and Path(argv[0]).name == "loom" and argv[1] == "web":
+        return True
+    return (
+        len(argv) >= 3
+        and Path(argv[0]).name.startswith("python")
+        and Path(argv[1]).name == "loom"
+        and argv[2] == "web"
+    )
+
+
 def find_loom(port: int) -> Process:
     matches = []
     for process in _processes():
         args = process.argv
-        joined = "\0".join(args)
-        is_loom = (
-            "\0-m\0loom\0web" in "\0" + joined
-            or (Path(args[0]).name == "loom" and len(args) > 1 and args[1] == "web")
-        )
-        if is_loom and _option(args, "--port") == str(port):
+        if _is_loom_web_argv(args) and _option(args, "--port") == str(port):
             matches.append(process)
     if len(matches) != 1:
         raise RuntimeError(
@@ -315,6 +324,13 @@ def _launch_command(old: Process, source: Path) -> tuple[list[str], Path]:
     argv = list(old.argv)
     if len(argv) >= 4 and argv[1:4] == ["-m", "loom", "web"]:
         argv[0] = str(python)
+    elif (
+        len(argv) >= 3
+        and Path(argv[0]).name.startswith("python")
+        and Path(argv[1]).name == "loom"
+        and argv[2] == "web"
+    ):
+        argv = [str(python), "-m", "loom", *argv[2:]]
     elif len(argv) >= 2 and Path(argv[0]).name == "loom" and argv[1] == "web":
         argv = [str(python), "-m", "loom", *argv[1:]]
     else:
@@ -342,7 +358,8 @@ def restart(args: argparse.Namespace) -> dict[str, Any]:
     token = old.env.get("LOOM_WEB_AUTH_TOKEN", "")
     if not token:
         raise RuntimeError("running Loom has no LOOM_WEB_AUTH_TOKEN")
-    if os.geteuid() != Path(f"/proc/{old.pid}").stat().st_uid:
+    proc_path = Path(f"/proc/{old.pid}")
+    if proc_path.exists() and os.geteuid() != proc_path.stat().st_uid:
         raise RuntimeError("running Loom belongs to another user")
 
     active = _active_one_shot_jobs(args.port, token)

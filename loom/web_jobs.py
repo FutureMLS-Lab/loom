@@ -9,6 +9,7 @@ handler calls in; nothing here knows HTTP.
 
 from __future__ import annotations
 
+import hashlib
 import re
 import threading
 import time
@@ -36,7 +37,13 @@ from loom.rud_task import (
     task_root,
     update_meta,
 )
-from loom.tmux_util import capture_pane, send_pane_text, tmux_subprocess_env
+from loom.tmux_util import (
+    capture_pane,
+    send_pane_key,
+    send_pane_text,
+    tmux_subprocess_env,
+)
+from loom.usage_budget import parse_pane_usage, usage_budget_violation
 from loom.web_activity import _AGENT_WORKING_RE, _MONITOR_CAPTURE_LINES, _iso_now
 from loom.web_util import _sanitize_session_name, _session_name_from_tmux_target
 
@@ -58,7 +65,32 @@ _AR_NUDGE_COOLDOWN = 600.0
 # human instead. A nudge after which the author visibly worked resets the
 # count: an author babysitting a half-day experiment answers every nudge
 # without finishing the round, and must not exhaust its budget for it.
-_AR_MAX_NUDGES = 12
+_AR_MAX_NUDGES = 2
+
+
+def _file_sha256(path: Path) -> str:
+    try:
+        digest = hashlib.sha256()
+        with path.open("rb") as stream:
+            for chunk in iter(lambda: stream.read(1024 * 1024), b""):
+                digest.update(chunk)
+        return digest.hexdigest()
+    except OSError:
+        return ""
+
+
+def _pause_rebuttal_if_over_budget(target: str, pane_text: str) -> tuple[bool, dict[str, Any], str]:
+    """Apply the same live-turn fuse to factory panes outside `.RUD`."""
+    if not _AGENT_WORKING_RE.search(pane_text or ""):
+        return False, {}, ""
+    usage = parse_pane_usage(pane_text)
+    reason = usage_budget_violation(usage)
+    if not reason:
+        return False, usage, ""
+    ok, error = send_pane_key(target, "C-c")
+    if not ok:
+        reason += f"; interrupt failed: {error or 'unknown error'}"
+    return True, usage, reason
 
 
 def _ar_run_async(fn, *args: Any) -> None:
@@ -427,6 +459,21 @@ def _rebuttal_watch_agent(project_id: str) -> None:
             rebuttal.write_state(project_id, state)
             return
         captured, pane_text = capture_pane(target, 80)
+        paused, usage, reason = (
+            _pause_rebuttal_if_over_budget(target, pane_text)
+            if captured
+            else (False, {}, "")
+        )
+        if paused:
+            state["agent_status"] = "budget_stopped"
+            state["usage_budget"] = {"reason": reason, "usage": usage}
+            state["error"] = (
+                f"Loom paused the rebuttal agent: {reason}. Partial files were "
+                "preserved; start a fresh run after inspection."
+            )
+            rebuttal.append_log(state, state["error"])
+            rebuttal.write_state(project_id, state)
+            return
         if captured and "Agent exited (" in pane_text:
             state["agent_status"] = "error"
             state["error"] = (
@@ -734,6 +781,25 @@ def _rebuttal_watch_delivery_agent(project_id: str) -> None:
             rebuttal.write_state(project_id, state)
             return
         captured, pane_text = capture_pane(target, 80)
+        paused, usage, reason = (
+            _pause_rebuttal_if_over_budget(target, pane_text)
+            if captured
+            else (False, {}, "")
+        )
+        if paused:
+            current = dict(current)
+            current["agent_status"] = "budget_stopped"
+            current["phase"] = "blocked"
+            current["usage_budget"] = {"reason": reason, "usage": usage}
+            state["delivery"] = current
+            state["stage"] = rebuttal.STAGE_DELIVERY_BLOCKED
+            state["error"] = (
+                f"Loom paused the delivery agent: {reason}. Partial files were "
+                "preserved; start a fresh attempt after inspection."
+            )
+            rebuttal.append_log(state, state["error"])
+            rebuttal.write_state(project_id, state)
+            return
         if captured and "Agent exited (" in pane_text:
             current = dict(current)
             current["agent_status"] = "error"
@@ -1226,6 +1292,7 @@ def _ar_review_job(root: Path, slug: str) -> None:
         "headline": res.get("headline") or "",
         "deciding_model": res.get("deciding_model") or "",
         "input_pdf": res.get("input_pdf") or str(paper_dir / "main.pdf"),
+        "input_sha256": res.get("input_sha256") or "",
         "reviewers": stored_reviewers,
     }
     state["review_status"] = "done"
@@ -1624,6 +1691,21 @@ class _ARLoopDriver:
         self._send_round_prompt(self._state(), n)
 
     def _send_round_prompt(self, state: dict[str, Any], n: int) -> None:
+        rec = ar.ensure_round(state, n)
+        if not rec.get("fresh_session_started_at"):
+            rotated = self.manager.rotate_pane(
+                self.project_root, self.project_id, self.slug
+            )
+            if not rotated.get("ok"):
+                self.last_error = (
+                    "could not start a fresh author session: "
+                    + str(rotated.get("error") or "unknown error")
+                )
+                return
+            rec["fresh_session_started_at"] = _iso_now()
+            self._save(state)
+            self._note(f"round {n}: started a fresh context window")
+
         previous = ar.round_record(state, n - 1) or {}
         review = previous.get("review") if isinstance(previous.get("review"), dict) else {}
         review_text = ""
@@ -1666,6 +1748,20 @@ class _ARLoopDriver:
             if isinstance(rec.get("readiness"), dict)
             else {}
         )
+        if not readiness.get("repair_session_started_at"):
+            rotated = self.manager.rotate_pane(
+                self.project_root, self.project_id, self.slug
+            )
+            if not rotated.get("ok"):
+                self.last_error = (
+                    "could not start a fresh readiness-repair session: "
+                    + str(rotated.get("error") or "unknown error")
+                )
+                return
+            readiness["repair_session_started_at"] = _iso_now()
+            rec["readiness"] = readiness
+            self._save(state)
+            self._note(f"round {n}: started a fresh repair context window")
         report_value = str(readiness.get("report_path") or "")
         prompt = ar.author_readiness_repair_prompt(
             task_root(self.project_root, self.slug),
@@ -1769,7 +1865,28 @@ class _ARLoopDriver:
         }
         rec["readiness"] = readiness
         rec.pop("review_error", None)
+        pdf_path = Path(str(build.get("pdf") or self._paper_dir() / "main.pdf"))
+        pdf_sha256 = _file_sha256(pdf_path)
+        rec["input_pdf_sha256"] = pdf_sha256
         self._save(state)
+
+        previous = ar.round_record(state, n - 1) or {}
+        previous_review = (
+            previous.get("review")
+            if isinstance(previous.get("review"), dict)
+            else {}
+        )
+        if pdf_sha256 and pdf_sha256 == str(previous_review.get("input_sha256") or ""):
+            state["stage"] = ar.STAGE_AWAIT_FINAL_REVIEW
+            state["loop_running"] = False
+            state["stop_reason"] = (
+                f"round {n} produced the same compiled PDF as round {n - 1}; "
+                "reviewer calls were skipped"
+            )
+            self._save(state)
+            self._note(state["stop_reason"])
+            self.stop()
+            return
         self._note(f"round {n} readiness passed - starting reviewer panel")
 
         def _panel() -> dict[str, Any]:
@@ -1789,16 +1906,11 @@ class _ARLoopDriver:
 
         result = _panel()
         if not result.get("ok"):
-            # A panel failure is usually transient (a CLI exec hiccup, a
-            # timeout, one reviewer dying); killing the whole loop over one
-            # blink stranded papers overnight. One retry, then stop for real.
-            self._note(
-                f"round {n} review failed ({result.get('error')}) - "
-                "retrying once in 30s"
-            )
-            if self._stop.wait(30):
-                return
-            result = _panel()
+            # A blind retry re-ran every successful reviewer as well as the
+            # failed one, multiplying spend after a transient error. Fail
+            # closed and let the user retry deliberately after inspecting the
+            # recorded panel error.
+            self._note(f"round {n} review failed; automatic retry suppressed")
         state = self._state()
         rec = ar.ensure_round(state, n)
         if not result.get("ok"):
@@ -1833,6 +1945,7 @@ class _ARLoopDriver:
             "headline": result.get("headline") or "",
             "deciding_model": result.get("deciding_model") or "",
             "input_pdf": result.get("input_pdf") or str(self._paper_dir() / "main.pdf"),
+            "input_sha256": pdf_sha256,
             "reviewers": stored_reviewers,
         }
         rec.pop("review_error", None)
@@ -1982,6 +2095,20 @@ class ARLoopManager:
             env=ar.agent_env(),
         )
 
+    def rotate_pane(
+        self, project_root: Path, project_id: str, slug: str
+    ) -> dict[str, Any]:
+        """Give an automated author round a clean context window."""
+        if self.registry is None:
+            return {"ok": False, "error": "no agent registry - press Start Agent"}
+        return self.registry.rotate(
+            project_root,
+            project_id,
+            slug,
+            default_skills=self.default_skills,
+            env=ar.agent_env(),
+        )
+
     def wait_until_ready(self, target: str, timeout: float = 12.0) -> None:
         if self.registry is not None:
             self.registry.wait_until_ready(target, timeout=timeout)
@@ -2099,5 +2226,3 @@ class ARLoopManager:
                 except Exception:  # noqa: BLE001
                     continue
         return started
-
-
