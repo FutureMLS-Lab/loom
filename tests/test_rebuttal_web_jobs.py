@@ -19,6 +19,31 @@ def _pdf(path: Path) -> None:
         writer.write(handle)
 
 
+def test_rebuttal_panes_use_live_turn_budget(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("LOOM_TURN_TOKEN_BUDGET", "1000000")
+    monkeypatch.setenv("LOOM_CONTEXT_PERCENT_BUDGET", "80")
+    keys = []
+    monkeypatch.setattr(
+        web,
+        "send_pane_key",
+        lambda target, key: (keys.append((target, key)), (True, ""))[1],
+    )
+    pane = (
+        "Running  1.1M tokens\n"
+        "→ Add a follow-up  ctrl+c to stop\n"
+        "GPT-5.6 Sol 272K Max Fast · 40.0% · Run Everything\n"
+    )
+
+    paused, usage, reason = web._pause_rebuttal_if_over_budget(
+        "loom-rebuttal:0.0", pane
+    )
+
+    assert paused is True
+    assert usage["turn_tokens"] == 1_100_000
+    assert "1,100,000 tokens" in reason
+    assert keys == [("loom-rebuttal:0.0", "C-c")]
+
+
 @pytest.fixture()
 def project(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> str:
     monkeypatch.setenv(

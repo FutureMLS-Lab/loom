@@ -928,6 +928,60 @@ def test_loop_driver_returns_failed_readiness_to_same_round(
     assert repair_prompts == [1]
 
 
+def test_loop_driver_skips_panel_when_pdf_is_unchanged(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import hashlib
+    from loom.web_jobs import _ARLoopDriver
+
+    root = _project(tmp_path)
+    meta = create_task(root, "dedupe", "goal", kind=ar.KIND_AR, auto_worktree=False)
+    pdf = tmp_path / "main.pdf"
+    pdf.write_bytes(b"%PDF-1.4\nunchanged\n")
+    digest = hashlib.sha256(pdf.read_bytes()).hexdigest()
+    state = ar.new_paper_state(parent_slug="studio", idea={"title": "T"})
+    state["stage"] = ar.STAGE_LOOP
+    state["round"] = 2
+    ar.ensure_round(state, 1)["review"] = {
+        "input_sha256": digest,
+        "scores": {"rating": 4},
+    }
+    ar.ensure_round(state, 2)
+    ar.write_ar_state(root, meta.slug, state)
+    note = ar.author_note_path(root, meta.slug, 2)
+    note.parent.mkdir(parents=True, exist_ok=True)
+    note.write_text("# Round 2\n\ncomplete", encoding="utf-8")
+    driver = _ARLoopDriver(object(), root, "project", meta.slug)
+    monkeypatch.setattr(
+        driver,
+        "_build",
+        lambda: {"ok": True, "clean": True, "pdf": str(pdf)},
+    )
+    monkeypatch.setattr(
+        ar,
+        "review_readiness",
+        lambda *args, **kwargs: {
+            "ready": True,
+            "checks": [],
+            "failed": [],
+            "pdf": str(pdf),
+            "checked_at": "2026-09-24T00:00:00+00:00",
+        },
+    )
+
+    def panel_must_not_run(*args, **kwargs):
+        raise AssertionError("unchanged PDF was sent to the reviewer panel")
+
+    monkeypatch.setattr("loom.review_task.panel_review", panel_must_not_run)
+    driver._close_round(state, 2, note)
+
+    after = ar.read_ar_state(root, meta.slug)
+    assert after["stage"] == ar.STAGE_AWAIT_FINAL_REVIEW
+    assert after["loop_running"] is False
+    assert "same compiled PDF" in after["stop_reason"]
+    assert ar.round_record(after, 2)["input_pdf_sha256"] == digest
+
+
 # --- gates and rounds -------------------------------------------------------
 
 
@@ -956,7 +1010,9 @@ def test_final_gate_delivers_or_extends() -> None:
     ar.record_gate(state, ar.GATE_FINAL, "reject", "needs a real baseline")
     # A rejection buys another batch of rounds rather than ending the task.
     assert state["stage"] == ar.STAGE_LOOP
-    assert state["max_rounds"] == 20
+    assert state["max_rounds"] == min(
+        ar.MAX_ROUNDS_LIMIT, 10 + ar.DEFAULT_MAX_ROUNDS
+    )
 
     state["stage"] = ar.STAGE_AWAIT_FINAL_REVIEW
     ar.record_gate(state, ar.GATE_FINAL, "approve")
@@ -1850,7 +1906,7 @@ def test_author_prompts_carry_the_contract(tmp_path: Path) -> None:
     rnd = ar.author_round_prompt(
         task_dir, paper_dir, state, 3, review_text="Rating: 4", gate_note="add a baseline"
     )
-    assert "ROUND 3 of 10" in rnd
+    assert f"ROUND 3 of {ar.DEFAULT_MAX_ROUNDS}" in rnd
     assert "Rating: 4" in rnd
     assert "add a baseline" in rnd
     assert str(ar.author_note_path_for(task_dir, 3)) in rnd
@@ -1880,6 +1936,11 @@ def test_author_prompts_carry_the_contract(tmp_path: Path) -> None:
     assert "missing: figures/main.pdf" in repair
     assert "Continue the SAME round" in repair
     assert str(ar.author_note_path_for(task_dir, 3)) in repair
+
+    stable_prefix = ar.author_static_contract(state)
+    assert draft.startswith(stable_prefix)
+    assert rnd.startswith(stable_prefix)
+    assert repair.startswith(stable_prefix)
 
 
 def test_studio_prompt_reflects_mode(tmp_path: Path) -> None:

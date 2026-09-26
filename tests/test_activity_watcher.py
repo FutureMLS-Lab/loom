@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from loom.web import AgentActivityWatcher
+from loom.usage_budget import parse_pane_usage, read_budget_marker
 
 
 class FakeRegistry:
@@ -75,3 +76,43 @@ def test_a_directory_outside_every_task_reports_nothing(tmp_path):
     # The repository root is what a stop event actually carries, and it maps to
     # no single task - guessing one would ring the wrong thing.
     assert watcher.report_finished(str(project), "") is None
+
+
+def test_cursor_status_usage_is_parsed(monkeypatch):
+    monkeypatch.setenv("LOOM_TURN_TOKEN_BUDGET", "1500000")
+    monkeypatch.setenv("LOOM_CONTEXT_PERCENT_BUDGET", "50")
+    usage = parse_pane_usage(
+        "Running subagent  2.78M tokens\n"
+        "GPT-5.6 Sol 272K Max Fast · 57.3% · 3 files edited  Run Everything\n"
+    )
+    assert usage["turn_tokens"] == 2_780_000
+    assert usage["context_percent"] == 57.3
+
+
+def test_activity_watcher_interrupts_runaway_turn_once(tmp_path, monkeypatch):
+    project = tmp_path / "proj"
+    task = project / ".RUD" / "costly-task"
+    task.mkdir(parents=True)
+    monkeypatch.setenv("LOOM_TURN_TOKEN_BUDGET", "1000000")
+    monkeypatch.setenv("LOOM_CONTEXT_PERCENT_BUDGET", "80")
+    keys = []
+    monkeypatch.setattr(
+        "loom.web_activity.send_pane_key",
+        lambda target, key: (keys.append((target, key)), (True, ""))[1],
+    )
+    watcher = AgentActivityWatcher(FakeRegistry([]))
+    pane = (
+        "Running subagent  1.20M tokens\n"
+        "→ Add a follow-up  ctrl+c to stop\n"
+        "GPT-5.6 Sol 272K Max Fast · 42.0% · 1 file edited  Run Everything\n"
+    )
+
+    watcher._observe_pane("p1", project, "costly-task", "loom-x:0.0", pane, 10.0)
+    watcher._observe_pane("p1", project, "costly-task", "loom-x:0.0", pane, 14.0)
+
+    assert keys == [("loom-x:0.0", "C-c")]
+    marker = read_budget_marker(task)
+    assert marker["rotate_required"] is True
+    assert marker["usage"]["turn_tokens"] == 1_200_000
+    stop = watcher.snapshot()["tasks"]["p1/costly-task"]["budget_stop"]
+    assert stop["interrupt_ok"] is True

@@ -17,6 +17,7 @@ restarting; the agent-facing methodology lives in ``loom/skills/ar/*.md``.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import re
 import shutil
@@ -97,8 +98,8 @@ STAGE_LABELS = {
 GATE_DRAFT = "draft"
 GATE_FINAL = "final"
 
-DEFAULT_MAX_ROUNDS = 10
-MAX_ROUNDS_LIMIT = 50
+DEFAULT_MAX_ROUNDS = 4
+MAX_ROUNDS_LIMIT = 12
 
 MODE_AUTO = "auto"
 MODE_SEED = "seed"
@@ -124,10 +125,9 @@ DEFAULT_BACKGROUND_FIT_MODE = "balanced"
 
 # Three independent model families so the panel does not share one vendor's
 # blind spots: OpenAI GPT-5.6, Anthropic Claude (Fable), and Moonshot Kimi.
-# Each is pinned to its strongest reasoning preset (max/thinking-max). We
-# deliberately avoid Cursor's own Grok here - its pinned build churns (grok
-# 4.5 was retired for 4.6 and broke the panel), and vendor diversity matters
-# more than any one model. Prefer Fast variants when Cursor exposes one.
+# Review quality and iteration speed are deliberate here; cost control comes
+# from bounded rounds, deduplication and compact context handoffs rather than
+# silently substituting weaker reviewers.
 CURSOR_REVIEWER_MODELS: tuple[str, ...] = (
     "gpt-5.6-sol-max-fast",
     "claude-fable-5-thinking-max",
@@ -2743,6 +2743,10 @@ def run_reviewer(
             ]
         )
     text = "\n".join(sections).strip() + "\n"
+    try:
+        input_sha256 = hashlib.sha256(pdf.read_bytes()).hexdigest()
+    except OSError:
+        input_sha256 = ""
     return {
         "ok": True,
         "review": text,
@@ -2753,6 +2757,7 @@ def run_reviewer(
         "deciding_model": deciding_model,
         "cost": cost,
         "input_pdf": str(pdf),
+        "input_sha256": input_sha256,
     }
 
 
@@ -4163,24 +4168,14 @@ def default_prompt_block(limit: int = 20000) -> str:
     )
 
 
-def author_draft_prompt(
-    task_dir: Path, paper_dir: Path, state: dict[str, Any]
-) -> str:
-    """Stage-1 prompt: write the skeleton draft, leave results empty."""
-    venue = venue_entry(str(state.get("venue") or DEFAULT_VENUE)).get("label")
-    note = author_note_path_for(task_dir, 0)
-    return f"""You are the author of an AR paper task in Loom. This is the FIRST DRAFT.
+def author_static_contract(state: dict[str, Any]) -> str:
+    """Cache-stable prefix shared by every AR author stage.
 
-Task directory:
-{task_dir}
-
-Your pane starts in {task_dir / WORK_SUBDIR}, which holds two git repositories:
-  code/        your experiments
-  manuscript/  the paper, already seeded with the {venue} LaTeX skeleton
-Full path to the manuscript: {paper_dir}
-
-The idea this paper must establish:
-{idea_summary(state.get("idea") or {})}
+    Put the large invariant methodology before round numbers, reviewer text and
+    gate failures. Provider prefix caching can then reuse it across fresh
+    author sessions while stage-specific evidence stays at the end.
+    """
+    return f"""You are the author of an AR paper task in Loom.
 
 {default_prompt_block()}
 === AR author methodology - follow this exactly ===
@@ -4198,6 +4193,28 @@ The idea this paper must establish:
 {figure_skills_block()}
 
 {gpu_resources_block()}
+"""
+
+
+def author_draft_prompt(
+    task_dir: Path, paper_dir: Path, state: dict[str, Any]
+) -> str:
+    """Stage-1 prompt: write the skeleton draft, leave results empty."""
+    venue = venue_entry(str(state.get("venue") or DEFAULT_VENUE)).get("label")
+    note = author_note_path_for(task_dir, 0)
+    return f"""{author_static_contract(state)}
+=== CURRENT STAGE: FIRST DRAFT ===
+
+Task directory:
+{task_dir}
+
+Your pane starts in {task_dir / WORK_SUBDIR}, which holds two git repositories:
+  code/        your experiments
+  manuscript/  the paper, already seeded with the {venue} LaTeX skeleton
+Full path to the manuscript: {paper_dir}
+
+The idea this paper must establish:
+{idea_summary(state.get("idea") or {})}
 
 This round you are writing the SKELETON, not results. Finish the title,
 abstract arc, introduction with its contribution list, related work with real
@@ -4254,7 +4271,8 @@ def author_round_prompt(
     )
     stuck = plateau_note(state)
     stuck_block = f"\n=== THE LOOP IS STUCK - READ THIS FIRST ===\n{stuck}\n\n" if stuck else ""
-    return f"""You are the author of an AR paper task in Loom. This is ROUND {round_n} of {total}.
+    return f"""{author_static_contract(state)}
+=== CURRENT STAGE: ROUND {round_n} of {total} ===
 
 Task directory:
 {task_dir}
@@ -4266,22 +4284,6 @@ Your pane starts in {work}, which holds two git repositories:
 The idea this paper must establish:
 {idea_summary(state.get("idea") or {})}
 {gate_block}
-{default_prompt_block()}
-=== AR author methodology - follow this exactly ===
-{ar_skill_text(SKILL_AUTHOR) or "(AR author skill missing)"}
-=== end methodology ===
-
-{results_reporting_block()}
-
-{ai_tone_block()}
-
-{wacv_submission_block(state)}
-
-{wsdm_submission_block(state)}
-
-{figure_skills_block()}
-
-{gpu_resources_block()}
 {stuck_block}
 {feedback}
 
@@ -4342,7 +4344,8 @@ def author_readiness_repair_prompt(
         for item in failures
     ) or "- The gate did not provide details; rerun every readiness check."
     report = str(report_path) if report_path is not None else "(not written)"
-    return f"""You are still the author of Loom AR paper ROUND {round_n}.
+    return f"""{author_static_contract(state)}
+=== CURRENT STAGE: READINESS REPAIR FOR ROUND {round_n} ===
 
 The reviewer panel was NOT called. The deterministic Review Readiness Gate
 blocked this paper because it is not yet a complete, ready-to-submit {venue}
@@ -4363,19 +4366,7 @@ Full gate report:
 Failures that must all be fixed:
 {failure_lines}
 
-{default_prompt_block()}
-Continue the SAME round. Follow the AR author methodology exactly:
-{ar_skill_text(SKILL_AUTHOR) or "(AR author skill missing)"}
-
-{results_reporting_block()}
-
-{ai_tone_block()}
-
-{wacv_submission_block(state)}
-
-{wsdm_submission_block(state)}
-
-{gpu_resources_block()}
+Continue the SAME round under the AR author methodology above.
 
 Before signalling completion again, make the whole submission complete:
 

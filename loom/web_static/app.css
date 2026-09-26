@@ -1597,7 +1597,7 @@ label { display: block; margin-top: 10px; font-size: 0.85rem; color: var(--text-
 }
 .wt-select:focus, .session-select:focus { outline: none; border-color: var(--border-focus); box-shadow: 0 0 0 3px var(--accent-soft); }
 .wt-picker__status { flex: 0 0 auto; }
-.wt-picker__push, .session-picker__resume { flex: 0 0 auto; }
+.wt-picker__push, .session-picker__resume, .session-picker__fresh { flex: 0 0 auto; }
 
 /* === Task filter input + count === */
 
@@ -2053,7 +2053,7 @@ textarea.editable__input {
   /* Worktree + session rows wrap instead of overflowing. */
   .wt-picker, .session-picker { flex-wrap: wrap; }
   .wt-select, .session-select { flex: 1 1 100%; }
-  .wt-picker__push, .session-picker__resume { flex: 1 1 auto; }
+  .wt-picker__push, .session-picker__resume, .session-picker__fresh { flex: 1 1 auto; }
   /* A long status ("11 modified, 11 untracked · no remote") must wrap here
      rather than run off the side of the phone. */
   .wt-picker__status { flex: 1 1 auto; min-width: 0; }

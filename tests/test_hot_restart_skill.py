@@ -66,6 +66,46 @@ def test_find_loom_by_explicit_port(monkeypatch: pytest.MonkeyPatch) -> None:
     assert hot_restart.find_loom(8766) == expected
 
 
+def test_find_and_relaunch_python_console_script_shape(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    expected = hot_restart.Process(
+        pid=123456,
+        ppid=1,
+        argv=(
+            "/old/.venv/bin/python",
+            "/old/.venv/bin/loom",
+            "web",
+            "--port",
+            "8765",
+            "--project",
+            "/project",
+        ),
+        cwd=Path("/old"),
+        env={},
+    )
+    monkeypatch.setattr(hot_restart, "_processes", lambda: [expected])
+    assert hot_restart.find_loom(8765) == expected
+
+    source = tmp_path / "loom"
+    (source / "loom").mkdir(parents=True)
+    python = source / ".venv" / "bin" / "python"
+    python.parent.mkdir(parents=True)
+    python.write_text("", encoding="utf-8")
+    command, cwd = hot_restart._launch_command(expected, source)
+    assert command == [
+        str(python),
+        "-m",
+        "loom",
+        "web",
+        "--port",
+        "8765",
+        "--project",
+        "/project",
+    ]
+    assert cwd == source
+
+
 def test_find_turbogate_when_launched_through_dynamic_loader(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
