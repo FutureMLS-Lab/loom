@@ -29,7 +29,10 @@ from pathlib import Path
 from typing import Any
 
 PROFILES_ROOT_ENV = "LOOM_RESEARCHER_PROFILES_ROOT"
-DEFAULT_EXTRACTION_MODEL = "gpt-5.6-sol-max-fast"
+DEFAULT_EXTRACTION_MODEL = (
+    os.environ.get("LOOM_CURSOR_DEFAULT_MODEL", "grok-4.7-high-fast").strip()
+    or "grok-4.7-high-fast"
+)
 EXTRACTION_MODEL_ENV = "LOOM_RESEARCHER_PROFILE_MODEL"
 
 PROFILE_FILE = "profile.json"

@@ -55,7 +55,12 @@ AGENT_CURSOR = "cursor"
 AGENT_CLAUDE = "claude"
 AGENT_CODEX = "codex"
 SUPPORTED_AGENTS = frozenset({AGENT_CURSOR, AGENT_CLAUDE, AGENT_CODEX})
-CURSOR_DEFAULT_MODEL = "gpt-5.6-sol-max-fast"
+# Keep the common task/author default affordable. Operators can override it
+# without rebuilding Loom when account pricing or the Cursor catalogue moves.
+CURSOR_DEFAULT_MODEL = (
+    os.environ.get("LOOM_CURSOR_DEFAULT_MODEL", "grok-4.7-high-fast").strip()
+    or "grok-4.7-high-fast"
+)
 
 # Logical transcript footprint is not an exact token count (the supported
 # agents expose JSONL with different schemas), but it is a stable, provider-neutral
@@ -213,6 +218,10 @@ _LEGACY_DEFAULT_MODELS = {"claude-sonnet-4-6", "claude-opus-4-8"}
 _INVALID_CURSOR_DEFAULT_MODELS = {
     "gpt-5.6-sol-max",
     "gpt-5.6-sol-max[context=1m]",
+    # This was Loom's expensive default through 2026-09-27. Treat it as a
+    # default-shaped value, not an intentional pin, so existing tasks move to
+    # the current affordable default on their next fresh session.
+    "gpt-5.6-sol-max-fast",
 }
 
 

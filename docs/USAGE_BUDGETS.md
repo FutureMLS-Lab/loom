@@ -15,9 +15,11 @@ was repeated tool turns inside very large conversations.
 
 ## Guardrails
 
-- Cursor tasks keep the speed-first `gpt-5.6-sol-max-fast` default, available
+- Cursor tasks default to `grok-4.7-high-fast`, selected from the account's
+  current catalogue as the cost-conscious fast iteration model. Set
+  `LOOM_CURSOR_DEFAULT_MODEL` before starting Loom to override it. Available
   fast siblings are still preferred, and Claude panes keep `--effort max`.
-  Loom's context controls do not silently trade away iteration quality.
+  Explicit per-task model selections remain available in the UI.
 - A session receives a 4 MiB soft warning and an 8 MiB hard transcript-history
   budget. Cursor uses its canonical agent JSONL transcript; `store.db` is not
   counted because it also contains file snapshots and tool artifacts and can

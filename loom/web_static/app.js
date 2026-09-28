@@ -104,7 +104,7 @@ const STATE = {
   codeRootPattern: '.',
   codeRootPath: '',
   serverReachable: true,
-  modelDefaults: { cursor: 'gpt-5.6-sol-max', claude: 'claude-fable-5', codex: 'gpt-5.5' },
+  modelDefaults: { cursor: 'grok-4.7-high-fast', claude: 'claude-fable-5', codex: 'gpt-5.5' },
   modelOptions: { cursor: [], claude: [], codex: [] },
   tasks: [],
   // Every project's task list, keyed by project id: the sidebar shows them all.
@@ -663,7 +663,7 @@ async function loadProject() {
     STATE.skillsOptions = [];
     STATE.codeRootPattern = '.';
     STATE.codeRootPath = '';
-    STATE.modelDefaults = { cursor: 'gpt-5.6-sol-max', claude: 'claude-fable-5', codex: 'gpt-5.5' };
+    STATE.modelDefaults = { cursor: 'grok-4.7-high-fast', claude: 'claude-fable-5', codex: 'gpt-5.5' };
     STATE.modelOptions = { cursor: [], claude: [], codex: [] };
     renderSkillsPicker();
     renderTaskSkillsPicker();
