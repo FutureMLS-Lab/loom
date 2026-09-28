@@ -728,7 +728,7 @@ def test_normalize_and_label_agent() -> None:
 
 
 def test_cursor_defaults_to_fast_iteration_model(tmp_path: Path) -> None:
-    expected = "gpt-5.6-sol-max-fast"
+    expected = "grok-4.7-high-fast"
     assert rud_task.agent_default_model("cursor") == expected
     meta = create_task(
         tmp_path,
@@ -744,7 +744,7 @@ def test_cursor_defaults_to_fast_iteration_model(tmp_path: Path) -> None:
 def test_build_agent_command_cursor() -> None:
     from loom.rud_task import agent_default_model, build_agent_command
 
-    default_cmd = ["agent", "-f", "--model", "gpt-5.6-sol-max-fast"]
+    default_cmd = ["agent", "-f", "--model", "grok-4.7-high-fast"]
     assert build_agent_command("cursor") == default_cmd
     assert build_agent_command(
         "cursor", model=agent_default_model("cursor")
@@ -754,7 +754,7 @@ def test_build_agent_command_cursor() -> None:
         "agent",
         "-f",
         "--model",
-        "gpt-5.6-sol-max-fast",
+        "grok-4.7-high-fast",
         "--resume",
         "abc-123",
     ]
