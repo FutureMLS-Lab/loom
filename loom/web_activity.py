@@ -11,7 +11,7 @@ import threading
 import time
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 import re
 
@@ -26,6 +26,7 @@ from loom.rud_task import (
 )
 from loom.tmux_util import capture_pane, send_pane_key
 from loom.usage_budget import (
+    claim_auto_rotation,
     parse_pane_usage,
     usage_budget_violation,
     write_budget_marker,
@@ -212,9 +213,11 @@ class AgentActivityWatcher:
         self,
         registry: WebProjectRegistry,
         openclaw_client: OpenClawClient | None = None,
+        budget_rotate: Callable[[Path, str, str], dict[str, Any]] | None = None,
     ) -> None:
         self.registry = registry
         self.openclaw = openclaw_client
+        self.budget_rotate = budget_rotate
         self._lock = threading.Lock()
         self._state: dict[tuple[str, str], dict[str, Any]] = {}
         self._targets: list[tuple[str, Path, str, str]] = []
@@ -333,6 +336,61 @@ class AgentActivityWatcher:
                 )
             except Exception as exc:  # noqa: BLE001
                 print(f"[budget] {slug} emit error: {exc}", flush=True)
+        if ok:
+            self._schedule_budget_rotation(project_root, project_id, slug, key)
+
+    def _schedule_budget_rotation(
+        self,
+        project_root: Path,
+        project_id: str,
+        slug: str,
+        key: tuple[str, str],
+    ) -> None:
+        """Continue ordinary autonomous tasks in a bounded fresh session."""
+        if self.budget_rotate is None:
+            return
+        meta = read_meta(project_root, slug)
+        # AR paper rounds carry a separate completion-note contract. A generic
+        # PLAN handoff would lose that contract, so their own driver must resume
+        # them; ordinary agent/author tasks are safe to continue from PLAN.md.
+        if meta is None or str(getattr(meta, "kind", "agent")) not in {"agent", "author"}:
+            return
+        claim = claim_auto_rotation(task_root(project_root, slug))
+        if not claim.get("allowed"):
+            print(
+                f"[budget] {slug}: unattended rotation limit reached "
+                f"({claim.get('attempts', 0)}/{claim.get('limit', 0)})",
+                flush=True,
+            )
+            return
+
+        def run() -> None:
+            # Give the interrupted CLI a moment to settle before replacing its
+            # tmux pane. Worktree edits are already durable.
+            time.sleep(1.0)
+            try:
+                result = self.budget_rotate(project_root, project_id, slug)
+            except Exception as exc:  # noqa: BLE001
+                result = {"ok": False, "error": str(exc)}
+            with self._lock:
+                entry = self._state.get(key)
+                if entry is not None:
+                    stop = dict(entry.get("budget_stop") or {})
+                    stop["auto_rotation"] = {**claim, **result}
+                    entry["budget_stop"] = stop
+            print(
+                f"[budget] {slug}: unattended fresh-session rotation "
+                f"{'started' if result.get('ok') else 'failed'} "
+                f"({claim.get('attempts')}/{claim.get('limit')})"
+                + (f" - {result.get('error')}" if not result.get("ok") else ""),
+                flush=True,
+            )
+
+        threading.Thread(
+            target=run,
+            name=f"loom-budget-rotate-{slug}",
+            daemon=True,
+        ).start()
 
     def _loop(self) -> None:
         while not self._stop.is_set():
@@ -536,4 +594,3 @@ class TaskMonitorManager:
                 except Exception:  # noqa: BLE001
                     continue
         return started
-

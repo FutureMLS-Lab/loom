@@ -2,8 +2,11 @@
 
 from __future__ import annotations
 
+import json
+import threading
+
 from loom.web import AgentActivityWatcher
-from loom.usage_budget import parse_pane_usage, read_budget_marker
+from loom.usage_budget import claim_auto_rotation, parse_pane_usage, read_budget_marker
 
 
 class FakeRegistry:
@@ -116,3 +119,50 @@ def test_activity_watcher_interrupts_runaway_turn_once(tmp_path, monkeypatch):
     assert marker["usage"]["turn_tokens"] == 1_200_000
     stop = watcher.snapshot()["tasks"]["p1/costly-task"]["budget_stop"]
     assert stop["interrupt_ok"] is True
+
+
+def test_auto_rotation_quota_is_persistent_and_bounded(tmp_path, monkeypatch):
+    monkeypatch.setenv("LOOM_AUTO_ROTATE_BUDGET_LIMIT", "2")
+    task = tmp_path / "task"
+
+    first = claim_auto_rotation(task, now=100.0)
+    second = claim_auto_rotation(task, now=101.0)
+    blocked = claim_auto_rotation(task, now=102.0)
+    reset = claim_auto_rotation(task, now=100.0 + 24 * 60 * 60)
+
+    assert first["allowed"] is True and first["attempts"] == 1
+    assert second["allowed"] is True and second["attempts"] == 2
+    assert blocked["allowed"] is False and blocked["attempts"] == 2
+    assert reset["allowed"] is True and reset["attempts"] == 1
+
+
+def test_budget_stop_auto_rotates_an_ordinary_task(tmp_path, monkeypatch):
+    project = tmp_path / "proj"
+    task = project / ".RUD" / "overnight-task"
+    task.mkdir(parents=True)
+    (task / "task.json").write_text(
+        json.dumps({"slug": "overnight-task", "title": "t", "kind": "agent"})
+    )
+    monkeypatch.setenv("LOOM_TURN_TOKEN_BUDGET", "1000000")
+    monkeypatch.setenv("LOOM_CONTEXT_PERCENT_BUDGET", "80")
+    monkeypatch.setenv("LOOM_AUTO_ROTATE_BUDGET_LIMIT", "2")
+    monkeypatch.setattr("loom.web_activity.send_pane_key", lambda t, k: (True, ""))
+    monkeypatch.setattr("loom.web_activity.time.sleep", lambda _: None)
+    rotated = threading.Event()
+
+    def rotate(root, project_id, slug):
+        assert root == project
+        assert project_id == "p1"
+        assert slug == "overnight-task"
+        rotated.set()
+        return {"ok": True, "rotated": True}
+
+    watcher = AgentActivityWatcher(FakeRegistry([]), budget_rotate=rotate)
+    pane = (
+        "Running subagent  1.20M tokens\n"
+        "→ Add a follow-up  ctrl+c to stop\n"
+        "Grok 4.7 High Fast · 42.0% · 1 file edited  Run Everything\n"
+    )
+    watcher._observe_pane("p1", project, "overnight-task", "loom-x:0.0", pane, 10.0)
+
+    assert rotated.wait(1.0)

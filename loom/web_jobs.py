@@ -43,7 +43,7 @@ from loom.tmux_util import (
     send_pane_text,
     tmux_subprocess_env,
 )
-from loom.usage_budget import parse_pane_usage, usage_budget_violation
+from loom.usage_budget import parse_pane_usage, read_budget_marker, usage_budget_violation
 from loom.web_activity import _AGENT_WORKING_RE, _MONITOR_CAPTURE_LINES, _iso_now
 from loom.web_util import _sanitize_session_name, _session_name_from_tmux_target
 
@@ -61,10 +61,9 @@ _AR_STALL_IDLE_POLLS = 36
 # Between continue-nudges. Long enough that an author babysitting a slow
 # experiment gets re-woken at a sane pace instead of being spammed.
 _AR_NUDGE_COOLDOWN = 600.0
-# Consecutive fruitless nudges before we stop burning turns and tell the
-# human instead. A nudge after which the author visibly worked resets the
-# count: an author babysitting a half-day experiment answers every nudge
-# without finishing the round, and must not exhaust its budget for it.
+# Total continuation nudges per round before we stop burning turns and tell
+# the human instead. This is deliberately a hard cap: "worked for a while"
+# must not reset an overnight task's spending limit indefinitely.
 _AR_MAX_NUDGES = 2
 
 
@@ -1485,6 +1484,13 @@ class _ARLoopDriver:
             return
         if not target:
             return  # no pane yet; the paste path owns starting one
+        if read_budget_marker(task_root(self.project_root, self.slug)).get(
+            "rotate_required"
+        ):
+            # Never let the AR stall-recovery path bypass the context fuse by
+            # nudging the same oversized session. AR rounds need their own
+            # round-aware rotation rather than the generic PLAN handoff.
+            return
         ok, text = capture_pane(target, _MONITOR_CAPTURE_LINES)
         if not ok:
             return
@@ -1499,11 +1505,6 @@ class _ARLoopDriver:
             return
         rec = ar.ensure_round(state, n)
         nudges = int(rec.get("nudges") or 0)
-        if self._author_worked and nudges:
-            # The last nudge produced real work; only consecutive fruitless
-            # nudges count toward the cap.
-            nudges = 0
-            rec.pop("stall_reported", None)
         if nudges >= _AR_MAX_NUDGES:
             if not rec.get("stall_reported"):
                 rec["stall_reported"] = True
