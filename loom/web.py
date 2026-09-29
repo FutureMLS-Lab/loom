@@ -3982,7 +3982,20 @@ def serve(
     if _reaped:
         print(f"  Reaped {_reaped} orphaned web-terminal attach(es)", flush=True)
     sk = default_skills if default_skills.is_file() else bundled_skills_path().resolve()
-    activity_watcher = AgentActivityWatcher(web_project_registry, openclaw_client)
+    def _budget_rotate(project: Path, project_id: str, slug: str) -> dict[str, Any]:
+        return claude_registry.rotate_and_send(
+            project,
+            project_id,
+            slug,
+            "",
+            default_skills=sk,
+        )
+
+    activity_watcher = AgentActivityWatcher(
+        web_project_registry,
+        openclaw_client,
+        budget_rotate=_budget_rotate,
+    )
     activity_watcher.start()
     # Agents that support a stop hook report their own completion, which beats
     # watching their pane for it. The watcher above stays as the fallback for

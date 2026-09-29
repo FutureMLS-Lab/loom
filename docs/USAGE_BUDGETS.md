@@ -33,6 +33,11 @@ was repeated tool turns inside very large conversations.
   issue dozens of tool/model calls before the user gets another chance to
   press Send. Worktree changes are preserved, and the next message must rotate
   to a fresh `PLAN.md`-backed session.
+- Ordinary Agent and Author tasks automatically take that compact handoff when
+  running unattended, at most twice per task in a rolling 24-hour window. Set
+  `LOOM_AUTO_ROTATE_BUDGET_LIMIT` to tune the limit or `0` to require manual
+  continuation. AR paper rounds remain paused because their continuation must
+  preserve a round-specific completion-note contract.
 - Resuming an over-budget historical session requires a second explicit
   confirmation. Normal handoff state belongs in `PLAN.md` and the worktree,
   not in an indefinitely resumed chat.
@@ -65,6 +70,10 @@ active turn (default `1500000`) and `LOOM_CONTEXT_PERCENT_BUDGET` to the live
 context occupancy ceiling (default `50`). `0` disables either guard. The
 terminal reports rounded values and Loom polls every four seconds, so these are
 safety cutoffs rather than exact billing limits.
+
+Set `LOOM_AUTO_ROTATE_BUDGET_LIMIT` to the maximum unattended fresh-session
+continuations per task per rolling 24 hours (default `2`, maximum `20`). `0`
+disables unattended continuation while retaining the budget pause.
 
 The budget guard applies to messages sent through Loom's compose box and
 workflow buttons. Raw keystrokes sent directly into the embedded terminal are

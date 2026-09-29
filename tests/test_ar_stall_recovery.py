@@ -118,9 +118,8 @@ def test_nudges_stop_at_the_cap_and_tell_the_human(tmp_path, monkeypatch):
     assert ar.read_ar_state(tmp_path, slug)["rounds"][0]["stall_reported"] is True
 
 
-def test_a_nudge_that_produced_work_resets_the_cap(tmp_path, monkeypatch):
-    """An author babysitting a long experiment answers every nudge without
-    finishing the round; only consecutive fruitless nudges may hit the cap."""
+def test_work_does_not_reset_the_hard_nudge_cap(tmp_path, monkeypatch):
+    """Visible work must not turn the per-round spending cap into infinity."""
     slug = "paper-x"
     task = make_paper(tmp_path, slug)
     state = json.loads((task / "ar.json").read_text())
@@ -138,10 +137,29 @@ def test_a_nudge_that_produced_work_resets_the_cap(tmp_path, monkeypatch):
 
     driver._watch_author(ar.read_ar_state(tmp_path, slug), 1)
 
-    assert len(sent) == 1
+    assert not sent
     saved = ar.read_ar_state(tmp_path, slug)["rounds"][0]
-    assert saved["nudges"] == 1
-    assert "stall_reported" not in saved
+    assert saved["nudges"] == web._AR_MAX_NUDGES
+    assert saved["stall_reported"] is True
+
+
+def test_budget_marker_blocks_same_session_nudge(tmp_path, monkeypatch):
+    from loom.usage_budget import write_budget_marker
+
+    slug = "paper-x"
+    task = make_paper(tmp_path, slug)
+    write_budget_marker(task, target="loom-cursor-x:0.0", reason="limit", usage={})
+    sent: list[str] = []
+    monkeypatch.setattr(web, "capture_pane", lambda t, n: (True, "idle"))
+    monkeypatch.setattr(
+        web, "send_pane_text", lambda t, p, submit: (sent.append(p), (True, ""))[1]
+    )
+    driver = _ARLoopDriver(FakeManager(alive=True), tmp_path, "pid1", slug)
+    driver._author_idle_polls = web._AR_STALL_IDLE_POLLS
+
+    driver._watch_author(ar.read_ar_state(tmp_path, slug), 1)
+
+    assert not sent
 
 
 def test_new_round_rotates_context_once_before_prompt(tmp_path, monkeypatch):

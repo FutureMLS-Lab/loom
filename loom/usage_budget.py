@@ -19,6 +19,8 @@ from typing import Any
 
 DEFAULT_TURN_TOKEN_BUDGET = 1_500_000
 DEFAULT_CONTEXT_PERCENT_BUDGET = 50.0
+DEFAULT_AUTO_ROTATE_LIMIT = 2
+AUTO_ROTATE_WINDOW_SECONDS = 24 * 60 * 60
 _TOKEN_RE = re.compile(r"\b([0-9]+(?:\.[0-9]+)?)\s*([KMG]?)\s+tokens\b", re.I)
 _PERCENT_RE = re.compile(r"(?:^|[·|])\s*([0-9]+(?:\.[0-9]+)?)%\s*(?:[·|]|$)")
 
@@ -53,6 +55,17 @@ def context_percent_budget() -> float:
         "LOOM_CONTEXT_PERCENT_BUDGET",
         DEFAULT_CONTEXT_PERCENT_BUDGET,
         maximum=100.0,
+    )
+
+
+def auto_rotate_limit() -> int:
+    """Maximum unattended budget rotations per task in a rolling day."""
+    return int(
+        _bounded_float_env(
+            "LOOM_AUTO_ROTATE_BUDGET_LIMIT",
+            float(DEFAULT_AUTO_ROTATE_LIMIT),
+            maximum=20.0,
+        )
     )
 
 
@@ -151,3 +164,49 @@ def clear_budget_marker(task_dir: Path) -> None:
         pass
     except OSError:
         pass
+
+
+def auto_rotation_path(task_dir: Path) -> Path:
+    return task_dir / "usage-auto-rotation.json"
+
+
+def claim_auto_rotation(task_dir: Path, *, now: float | None = None) -> dict[str, Any]:
+    """Atomically claim one bounded unattended continuation slot.
+
+    The small persistent ledger survives Loom restarts, so restarting the web
+    process cannot accidentally reset an overnight task's spend ceiling.
+    """
+    import time
+
+    current = float(time.time() if now is None else now)
+    limit = auto_rotate_limit()
+    path = auto_rotation_path(task_dir)
+    try:
+        state = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        state = {}
+    started = float(state.get("window_started_epoch") or 0.0)
+    attempts = int(state.get("attempts") or 0)
+    if not started or current - started >= AUTO_ROTATE_WINDOW_SECONDS:
+        started = current
+        attempts = 0
+    allowed = bool(limit and attempts < limit)
+    if allowed:
+        attempts += 1
+    value = {
+        "allowed": allowed,
+        "attempts": attempts,
+        "limit": limit,
+        "window_started_epoch": started,
+        "last_claim_epoch": current if allowed else state.get("last_claim_epoch", 0),
+    }
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        tmp = path.with_suffix(".tmp")
+        tmp.write_text(json.dumps(value, indent=2) + "\n", encoding="utf-8")
+        tmp.replace(path)
+    except OSError:
+        # Fail closed: without a durable spend ledger, do not auto-continue.
+        value["allowed"] = False
+        value["error"] = "could not persist auto-rotation quota"
+    return value
