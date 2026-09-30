@@ -58,8 +58,8 @@ Loom ships exactly 23 skills - 5 pick-and-read, 3 Development Task, 15 Paper-Fac
 | Skill | Role | What it does / when to use it | How it reaches the agent | Path |
 |---|---|---|---|---|
 | sde-implementer | Implementer | Sole-writer engineering contract: test, commit a clean checkpoint, never push or merge. | Automatically added to every Development Task implementer. | `loom/skills/dev/sde-implementer/SKILL.md` |
-| sde-correctness-review | Reviewer A | Read-only correctness, edge-case, security, and regression-test review of an exact commit. | Injected only into Reviewer A's fresh headless session. | `loom/skills/dev/sde-correctness-review/SKILL.md` |
-| sde-architecture-review | Reviewer B | Read-only architecture, lifecycle, performance, and operational-risk review of an exact commit. | Injected only into Reviewer B's fresh headless session. | `loom/skills/dev/sde-architecture-review/SKILL.md` |
+| sde-correctness-review | Reviewer A | Behavioral correctness and verification: requirements, failure paths, data safety, and regression evidence. | Injected only into Reviewer A's fresh headless session. | `loom/skills/dev/sde-correctness-review/SKILL.md` |
+| sde-architecture-review | Reviewer B | System fit and operability: boundaries, integration contracts, lifecycle, cost, and maintainability. | Injected only into Reviewer B's fresh headless session. | `loom/skills/dev/sde-architecture-review/SKILL.md` |
 
 ### Paper Factory (AR) skills (15) - the pipeline injects these itself
 

@@ -49,8 +49,15 @@ bounded long-running coding job. One interactive Cursor implementer (Grok
 has run tests and committed a clean checkpoint, Loom creates an immutable
 detached snapshot and starts two fresh read-only reviewers in parallel:
 
-- Reviewer A imports the correctness/testing SDE skill.
-- Reviewer B imports the architecture/operational-risk SDE skill.
+- Reviewer A asks whether the change behaves correctly and fails safely. It owns
+  requirements, edge/state behavior, concrete security or data-integrity bugs,
+  and fresh verification evidence.
+- Reviewer B asks whether the change fits the system and can be operated safely.
+  It owns component boundaries, integration contracts, lifecycle/rollback,
+  performance and cost, and maintainability hazards.
+
+Their finding categories are disjoint and Loom validates them before accepting
+review output, so a reviewer cannot silently drift into the other's job.
 
 Reviews are keyed to the exact base and candidate SHAs. An unchanged commit is
 never reviewed twice; if one reviewer fails, retrying runs only that reviewer.

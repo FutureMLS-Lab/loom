@@ -67,6 +67,7 @@ def wait_for_path_missing(path: Path, timeout: float = 5.0):
 
 
 def reviewer_result(role: str, *, blocking: bool = False):
+    category = "requirements_behavior" if role == "A" else "component_boundary"
     return {
         "ok": True,
         "role": role,
@@ -75,6 +76,7 @@ def reviewer_result(role: str, *, blocking: bool = False):
         "findings": (
             [{
                 "id": f"{role}-001",
+                "category": category,
                 "severity": "P1",
                 "title": "Incorrect value",
                 "file": "app.py",
@@ -176,6 +178,7 @@ def test_normalize_review_promotes_blocking_severity():
             "verdict": "approve",
             "summary": "missed the severity",
             "findings": [{
+                "category": "edge_state",
                 "severity": "P1",
                 "title": "Race",
                 "file": "worker.py",
@@ -186,3 +189,34 @@ def test_normalize_review_promotes_blocking_severity():
     )
     assert normalized["verdict"] == "request_changes"
     assert normalized["findings"][0]["id"] == "A-001"
+    assert normalized["findings"][0]["category"] == "edge_state"
+
+
+def test_normalize_review_enforces_reviewer_ownership():
+    with pytest.raises(ValueError, match="Reviewer A finding category"):
+        development._normalize_review(
+            {
+                "verdict": "request_changes",
+                "summary": "architecture-only concern",
+                "findings": [{
+                    "category": "component_boundary",
+                    "severity": "P1",
+                    "title": "Layer violation",
+                }],
+            },
+            "A",
+        )
+
+    normalized = development._normalize_review(
+        {
+            "verdict": "approve",
+            "summary": "bounded architecture suggestion",
+            "findings": [{
+                "category": "maintainability",
+                "severity": "P3",
+                "title": "Duplicated authority",
+            }],
+        },
+        "B",
+    )
+    assert normalized["findings"][0]["category"] == "maintainability"

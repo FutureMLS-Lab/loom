@@ -35,6 +35,22 @@ DEFAULT_REVIEWER_MODEL = os.environ.get(
 _LOCK = threading.RLock()
 _JOBS: set[tuple[str, str]] = set()
 _SLUG_RE = re.compile(r"^[a-zA-Z0-9][a-zA-Z0-9_-]*$")
+REVIEW_CATEGORIES = {
+    "A": (
+        "requirements_behavior",
+        "edge_state",
+        "failure_safety",
+        "security_data_integrity",
+        "verification",
+    ),
+    "B": (
+        "component_boundary",
+        "integration_contract",
+        "lifecycle_operability",
+        "performance_cost",
+        "maintainability",
+    ),
+}
 
 
 def _now() -> str:
@@ -72,14 +88,14 @@ def skill_catalog() -> list[dict[str, str]]:
         {
             "name": "sde-correctness-review",
             "role": "Reviewer A",
-            "description": "Read-only correctness, edge-case, security, and regression-test review of an exact commit.",
+            "description": "Behavioral correctness and verification: requirements, failure paths, data safety, and regression evidence.",
             "injection": "Injected only into Reviewer A's fresh headless session.",
             "path": str(reviewer_skill_path("A")),
         },
         {
             "name": "sde-architecture-review",
             "role": "Reviewer B",
-            "description": "Read-only architecture, lifecycle, performance, and operational-risk review of an exact commit.",
+            "description": "System fit and operability: boundaries, integration contracts, lifecycle, cost, and maintainability.",
             "injection": "Injected only into Reviewer B's fresh headless session.",
             "path": str(reviewer_skill_path("B")),
         },
@@ -174,8 +190,8 @@ def initialize_task(
         "max_review_rounds": normalize_max_rounds(max_review_rounds),
         "reviewer_model": str(reviewer_model or DEFAULT_REVIEWER_MODEL).strip(),
         "reviewers": {
-            "A": {"name": "Correctness & tests", "skill": str(reviewer_skill_path("A"))},
-            "B": {"name": "Architecture & risk", "skill": str(reviewer_skill_path("B"))},
+            "A": {"name": "Behavioral correctness & verification", "skill": str(reviewer_skill_path("A"))},
+            "B": {"name": "Architecture, integration & operability", "skill": str(reviewer_skill_path("B"))},
         },
         "rounds": [],
         "approved_at": "",
@@ -277,6 +293,8 @@ def _review_prompt(
                 )
     prior_text = "\n".join(prior[-20:]) or "(none)"
     test_command = str(state.get("test_command") or "").strip() or "(not configured)"
+    categories = " | ".join(REVIEW_CATEGORIES[role])
+    category_example = REVIEW_CATEGORIES[role][0]
     return f"""You are Reviewer {role} in a Loom Development Task.
 
 Reviewer skill (mandatory):
@@ -293,11 +311,14 @@ Configured test command: {test_command}
 Review only `git diff {review_round['base_commit']}..{review_round['candidate_commit']}`
 and the minimum surrounding code/tests required to validate it. The candidate
 commit is the immutable review unit. You are read-only: do not edit files,
-create artifacts, commit, push, or merge. You may run commands that do not
-modify the worktree. Do not repeat a prior finding unless it remains present.
+run write-capable formatters or migrations, commit, push, or merge. Focused
+verification may create disposable ignored caches, but it must not change any
+tracked file. Do not repeat a prior finding unless it remains present.
 
 Prior findings for context:
 {prior_text}
+
+Allowed finding categories for Reviewer {role}: {categories}
 
 Return one JSON object and nothing else:
 {{
@@ -305,6 +326,7 @@ Return one JSON object and nothing else:
   "summary": "short evidence-based summary",
   "findings": [
     {{
+      "category": "{category_example}",
       "severity": "P0" | "P1" | "P2" | "P3",
       "title": "short defect title",
       "file": "repository-relative path",
@@ -343,6 +365,8 @@ def _extract_json(text: str) -> dict[str, Any]:
 
 
 def _normalize_review(payload: dict[str, Any], role: str) -> dict[str, Any]:
+    if role not in REVIEW_CATEGORIES:
+        raise ValueError(f"unknown reviewer role {role!r}")
     verdict = str(payload.get("verdict") or "").strip().lower()
     if verdict not in {"approve", "request_changes"}:
         raise ValueError("reviewer verdict must be approve or request_changes")
@@ -356,6 +380,12 @@ def _normalize_review(payload: dict[str, Any], role: str) -> dict[str, Any]:
         severity = str(raw.get("severity") or "").upper()
         if severity not in {"P0", "P1", "P2", "P3"}:
             raise ValueError(f"invalid finding severity {severity!r}")
+        category = str(raw.get("category") or "").strip().lower()
+        if category not in REVIEW_CATEGORIES[role]:
+            allowed = ", ".join(REVIEW_CATEGORIES[role])
+            raise ValueError(
+                f"Reviewer {role} finding category must be one of: {allowed}"
+            )
         title = str(raw.get("title") or "").strip()
         if not title:
             raise ValueError("each finding needs a title")
@@ -365,6 +395,7 @@ def _normalize_review(payload: dict[str, Any], role: str) -> dict[str, Any]:
             line = 0
         findings.append({
             "id": f"{role}-{index:03d}",
+            "category": category,
             "severity": severity,
             "title": title,
             "file": str(raw.get("file") or "").strip(),
@@ -691,7 +722,8 @@ def _write_report(project_root: Path, slug: str, state: dict[str, Any]) -> None:
                 if finding.get("line"):
                     location += f":{finding['line']}"
                 lines.extend([
-                    f"- **{finding.get('id')} {finding.get('severity')} — {finding.get('title')}** (`{location}`)",
+                    f"- **{finding.get('id')} {finding.get('severity')} — {finding.get('title')}** "
+                    f"[{finding.get('category') or 'uncategorized'}] (`{location}`)",
                     f"  - Evidence: {finding.get('evidence') or '(none supplied)'}",
                     f"  - Impact: {finding.get('impact') or '(none supplied)'}",
                     f"  - Fix: {finding.get('recommendation') or '(none supplied)'}",
