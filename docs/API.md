@@ -58,6 +58,19 @@ and `author_main_tex` (relative to the manuscript repository). Both repository
 paths must name git roots on the Loom host. The response is the normal task
 metadata; `GET /api/tasks/<slug>` also includes the persisted `author` config.
 
+For a bounded software-development task, set `kind: "development"` and
+optionally include `development_test_command`, `development_max_rounds` (1–5,
+default 2), and `development_reviewer_model` (defaults to
+`grok-4.7-high-fast`). Loom automatically adds the implementer skill and
+requires a git worktree.
+
+| Method | URL | Purpose |
+|--------|-----|---------|
+| `GET` | `/api/tasks/<slug>/development` | State, immutable review rounds, findings, current HEAD/cleanliness, and the durable Markdown report |
+| `POST` | `…/development/review` | Review a new clean committed checkpoint with fresh Reviewer A/B sessions (`202`) |
+| `POST` | `…/development/repair` | Rotate to a fresh implementer session with the blocking P0/P1 findings |
+| `POST` | `…/development/approve` | Human-approve the exact reviewed HEAD as ready to merge; never pushes or merges |
+
 ### Agent pane
 
 | Method | URL | Purpose |
@@ -208,6 +221,8 @@ revision (before the burial commit on 2026-08-25).
     ├── task.json         # title, goal, agent, skills, worktrees, sessions
     ├── PLAN.md           # done / results / to-do
     ├── monitor.json      # run-monitor state (only if used)
+    ├── development.json  # bounded code-review state (Development tasks)
+    ├── DEVELOPMENT_REVIEW.md # durable per-round code-review report
     ├── author.json       # existing-paper repositories / venue (Author tasks)
     ├── ar.json           # only for Factory (AR) tasks
     ├── rounds/round-NN/  # author notes, readiness reports, panel reviews

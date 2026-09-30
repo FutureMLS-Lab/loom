@@ -30,8 +30,17 @@ const DEFAULT_TAB = TABS[0].id;
 // pane as any other task, and the paper lives in the worktree the Code Diff
 // tab shows. The AR tab just leads.
 const AR_TAB = { id: 'ar', label: 'AR' };
-function tabsFor(meta) { return isArKind(meta && meta.kind) ? [AR_TAB, ...TABS] : TABS; }
-function defaultTabFor(meta) { return isArKind(meta && meta.kind) ? AR_TAB.id : DEFAULT_TAB; }
+const DEVELOPMENT_TAB = { id: 'development', label: 'Development' };
+function tabsFor(meta) {
+  if (isArKind(meta && meta.kind)) return [AR_TAB, ...TABS];
+  if (isDevelopmentKind(meta && meta.kind)) return [DEVELOPMENT_TAB, ...TABS];
+  return TABS;
+}
+function defaultTabFor(meta) {
+  if (isArKind(meta && meta.kind)) return AR_TAB.id;
+  if (isDevelopmentKind(meta && meta.kind)) return DEVELOPMENT_TAB.id;
+  return DEFAULT_TAB;
+}
 
 const AGENT_LABELS = { cursor: 'Agent', claude: 'Claude', codex: 'Codex' };
 function agentLabel(name) { return AGENT_LABELS[(name || '').toLowerCase()] || 'Agent'; }
@@ -40,6 +49,7 @@ function taskBackendLabel(meta) {
   meta = meta || {};
   const base = `${agentLabel(meta.agent)}${meta.interview_model ? ' · ' + meta.interview_model : ''}`;
   if (isAuthorKind(meta.kind)) return `Author · ${base}`;
+  if (isDevelopmentKind(meta.kind)) return `Development · ${base}`;
   return isArKind(meta.kind) ? `AR · ${base}` : base;
 }
 
@@ -49,6 +59,7 @@ function isArKind(kind) {
   return k === 'ar' || k === 'aris';
 }
 function isAuthorKind(kind) { return String(kind || '').toLowerCase() === 'author'; }
+function isDevelopmentKind(kind) { return String(kind || '').toLowerCase() === 'development'; }
 
 // Lightweight non-blocking toast (replaces jarring native alert() for transient
 // errors/notices). Stacks bottom-right, auto-dismisses; aria-live for SR users.
@@ -136,6 +147,8 @@ const STATE = {
   // True while a monitor enable/disable request is in flight, so the 4s
   // poll's loadMonitor() doesn't reset the toggle the user just clicked.
   monitorBusy: false,
+  developmentData: null,
+  developmentTimer: null,
 };
 
 let PROJECT_DRAG_ID = '';
@@ -269,6 +282,9 @@ function showPanel(id) {
   }
   if (id === 'ar') {
     deferIdle(() => refreshAr(true));
+  }
+  if (id === 'development') {
+    deferIdle(() => refreshDevelopment(true));
   }
 }
 
@@ -1531,7 +1547,9 @@ function renderTasksFromState() {
     li.tabIndex = 0;
     li.title = `${t.slug} · ${taskBackendLabel(t)}`;
     if (t.slug === selected) li.classList.add('active');
-    const typeLabel = isArKind(t.kind) ? 'AR' : (isAuthorKind(t.kind) ? 'Author' : agentLabel(t.agent));
+    const typeLabel = isArKind(t.kind)
+      ? 'AR'
+      : (isAuthorKind(t.kind) ? 'Author' : (isDevelopmentKind(t.kind) ? 'Dev' : agentLabel(t.agent)));
     const kindClass = isArKind(t.kind) ? 'ar' : (t.kind || 'agent');
     li.innerHTML =
       `<div class="task-title-row"><span class="task-title">${escapeHtml(t.title)}</span>` +
@@ -1597,6 +1615,7 @@ function clearTaskSelection() {
   STATE.worktreeStatuses = [];
   STATE.taskRoot = '';
   STATE.planPath = '';
+  resetDevelopment();
   if (STATE.paneTimer) {
     clearInterval(STATE.paneTimer);
     STATE.paneTimer = null;
@@ -1661,6 +1680,7 @@ async function selectTask(slug) {
   STATE.changesData = null;
   STATE.changesSelected = '';
   resetArLab();
+  resetDevelopment();
   ackActivity(slug);
   document.querySelectorAll('#task-list li').forEach((li) => {
     li.classList.toggle('active', li.dataset.slug === slug);
@@ -1693,8 +1713,7 @@ async function selectTask(slug) {
     STATE.previewCache = {};
     applyAgentLabels(cached);
     buildTabs(cached);
-    if (isArKind(cached.kind)) showPanel('ar');
-    else showPanel(DEFAULT_TAB);
+    showPanel(defaultTabFor(cached));
   }
 
   let d;
@@ -1743,6 +1762,7 @@ async function selectTask(slug) {
   // refresh callbacks unnecessarily.
   if (!cached) {
     if (isArKind(d.meta.kind)) { showPanel('ar'); initArLab(d.meta); }
+    else if (isDevelopmentKind(d.meta.kind)) showPanel('development');
     else showPanel(DEFAULT_TAB);
   } else if (isArKind(d.meta.kind)) {
     initArLab(d.meta);
@@ -3129,6 +3149,7 @@ const AGENT_HINTS = {
   claude: 'Claude Code pane. Resume a past session by UUID.',
   codex: 'Codex CLI pane. Resume with codex resume <id>.',
   author: 'Existing-paper Author: one Cursor Agent with isolated manuscript and experiment worktrees plus paper-writing skills.',
+  development: 'Development: one Cursor implementer owns an isolated worktree; two fresh read-only SDE reviewers inspect committed checkpoints.',
   ar: 'Automated research: mine a direction for ideas, then each idea you pick becomes a task that drafts a paper, runs its experiments, and iterates against a reviewer agent.',
 };
 
@@ -3248,7 +3269,14 @@ function updateCreateAgentHint(resetModel = false) {
     resetModel ? null : (input?.value || null),
   );
   updateAuthorCreateFields();
+  updateDevelopmentCreateFields();
   updateArCreateFields();
+}
+
+function updateDevelopmentCreateFields() {
+  const wrap = document.getElementById('development-create-fields');
+  if (!wrap) return;
+  wrap.hidden = document.getElementById('new-agent-select')?.value !== 'development';
 }
 
 function updateAuthorCreateFields() {
@@ -3343,6 +3371,10 @@ function resetCreateForm() {
   if (authorManuscript) authorManuscript.value = '';
   const authorExperiments = document.getElementById('author-experiment-repo');
   if (authorExperiments) authorExperiments.value = '';
+  const devTest = document.getElementById('development-test-command');
+  if (devTest) devTest.value = '';
+  const devRounds = document.getElementById('development-max-rounds');
+  if (devRounds) devRounds.value = '2';
   updateCreateAgentHint(true);
 }
 
@@ -3695,6 +3727,178 @@ document.getElementById('btn-notes-save').addEventListener('click', saveNotes);
 document.getElementById('notes-modal').addEventListener('click', (event) => {
   if (event.target.id === 'notes-modal') closeNotesModal();
 });
+
+// ===== Development Task =====
+
+function resetDevelopment() {
+  STATE.developmentData = null;
+  if (STATE.developmentTimer) {
+    clearTimeout(STATE.developmentTimer);
+    STATE.developmentTimer = null;
+  }
+  const summary = document.getElementById('dev-summary');
+  const reviewers = document.getElementById('dev-reviewer-grid');
+  const findings = document.getElementById('dev-findings');
+  if (summary) summary.innerHTML = '';
+  if (reviewers) reviewers.innerHTML = '';
+  if (findings) findings.innerHTML = '';
+}
+
+const DEV_STAGE_LABELS = {
+  implementing: 'Implementing',
+  reviewing: 'Reviewing',
+  review_error: 'Review error',
+  repair_needed: 'Repair needed',
+  repairing: 'Repairing',
+  human_gate: 'Human gate',
+  ready_to_merge: 'Ready to merge',
+};
+
+function devFindingHtml(finding) {
+  const location = finding.file
+    ? `${finding.file}${finding.line ? ':' + finding.line : ''}`
+    : 'repository';
+  return `<article class="dev-finding dev-finding--${escapeHtml(finding.severity || 'P3')}">
+    <div class="dev-finding__head">
+      <strong>${escapeHtml(finding.id || '')} ${escapeHtml(finding.severity || '')} · ${escapeHtml(finding.title || '')}</strong>
+      <code>${escapeHtml(location)}</code>
+    </div>
+    ${finding.evidence ? `<p><b>Evidence:</b> ${escapeHtml(finding.evidence)}</p>` : ''}
+    ${finding.impact ? `<p><b>Impact:</b> ${escapeHtml(finding.impact)}</p>` : ''}
+    ${finding.recommendation ? `<p><b>Fix:</b> ${escapeHtml(finding.recommendation)}</p>` : ''}
+    ${finding.test ? `<p><b>Test:</b> ${escapeHtml(finding.test)}</p>` : ''}
+  </article>`;
+}
+
+function renderDevelopment(state) {
+  STATE.developmentData = state || null;
+  const stage = String(state?.stage || 'unknown');
+  const badge = document.getElementById('dev-stage-badge');
+  if (badge) {
+    badge.textContent = DEV_STAGE_LABELS[stage] || stage;
+    badge.dataset.state = stage;
+  }
+  const rounds = Array.isArray(state?.rounds) ? state.rounds : [];
+  const status = document.getElementById('dev-round-status');
+  if (status) status.textContent = `· ${rounds.length}/${state?.max_review_rounds || 2} rounds`;
+  const summary = document.getElementById('dev-summary');
+  if (summary) {
+    summary.innerHTML = `<div><span>Branch checkpoint</span><code>${escapeHtml((state?.current_commit || '').slice(0, 12) || '—')}</code></div>
+      <div><span>Last reviewed</span><code>${escapeHtml((state?.last_reviewed_commit || '').slice(0, 12) || '—')}</code></div>
+      <div><span>Worktree</span><strong>${state?.worktree_clean ? 'clean' : 'has uncommitted changes'}</strong></div>
+      <div><span>Reviewer model</span><code>${escapeHtml(state?.reviewer_model || '')}</code></div>
+      <div class="dev-summary__wide"><span>Tests</span><code>${escapeHtml(state?.test_command || 'not configured')}</code></div>`;
+  }
+
+  const latest = rounds.length ? rounds[rounds.length - 1] : null;
+  const reviewerRoot = document.getElementById('dev-reviewer-grid');
+  if (reviewerRoot) {
+    reviewerRoot.innerHTML = ['A', 'B'].map((role) => {
+      const config = state?.reviewers?.[role] || {};
+      const result = latest?.reviewers?.[role];
+      let verdict = latest?.status === 'running' && !result ? 'running' : 'not run';
+      let body = 'Fresh read-only session; no result yet.';
+      if (result?.ok) {
+        verdict = result.verdict || 'complete';
+        body = result.summary || 'Review completed.';
+      } else if (result?.error) {
+        verdict = 'error';
+        body = result.error;
+      }
+      return `<article class="dev-reviewer-card" data-verdict="${escapeHtml(verdict)}">
+        <div class="dev-reviewer-card__head"><strong>Reviewer ${role}</strong><span>${escapeHtml(verdict)}</span></div>
+        <h4>${escapeHtml(config.name || '')}</h4>
+        <p>${escapeHtml(body)}</p>
+        <small>${escapeHtml((config.skill || '').split('/').slice(-2, -1)[0] || '')}</small>
+      </article>`;
+    }).join('');
+  }
+
+  const findingRoot = document.getElementById('dev-findings');
+  if (findingRoot) {
+    if (!rounds.length) {
+      findingRoot.innerHTML = '<p class="tab-panel__hint">Commit a clean checkpoint, then run both reviewers.</p>';
+    } else {
+      findingRoot.innerHTML = rounds.map((round) => {
+        const findings = ['A', 'B'].flatMap((role) => round?.reviewers?.[role]?.findings || []);
+        return `<section class="dev-round">
+          <div class="dev-round__head"><strong>Round ${escapeHtml(round.number || '')}</strong>
+            <span>${escapeHtml(round.status || '')}</span>
+            <code>${escapeHtml((round.base_commit || '').slice(0, 8))} → ${escapeHtml((round.candidate_commit || '').slice(0, 8))}</code>
+          </div>
+          ${round.error ? `<p class="dev-round__error">${escapeHtml(round.error)}</p>` : ''}
+          ${findings.length ? findings.map(devFindingHtml).join('') : '<p class="tab-panel__hint">No findings recorded.</p>'}
+        </section>`;
+      }).join('');
+    }
+  }
+
+  const review = document.getElementById('btn-dev-review');
+  const repair = document.getElementById('btn-dev-repair');
+  const approve = document.getElementById('btn-dev-approve');
+  if (review) review.disabled = stage === 'reviewing' || stage === 'repair_needed' || stage === 'human_gate' || stage === 'ready_to_merge';
+  if (repair) repair.disabled = stage !== 'repair_needed';
+  if (approve) approve.disabled = stage !== 'human_gate';
+  const hint = document.getElementById('dev-hint');
+  if (hint) {
+    hint.textContent = stage === 'repair_needed'
+      ? 'Blocking P0/P1 findings are ready for a fresh implementer repair session.'
+      : stage === 'human_gate'
+        ? 'Automated rounds are complete. Inspect the findings and approve only if this exact HEAD is acceptable.'
+        : stage === 'ready_to_merge'
+          ? 'Human-approved. Loom has not pushed or merged anything.'
+          : 'The implementer is the only writer. Reviewers inspect an immutable commit and never push or merge.';
+  }
+}
+
+async function refreshDevelopment(silent = false) {
+  if (!STATE.slug || !isDevelopmentKind(STATE.currentMeta?.kind)) return;
+  const slug = STATE.slug;
+  try {
+    const payload = await api(`/api/tasks/${encodeURIComponent(slug)}/development`);
+    if (STATE.slug !== slug) return;
+    renderDevelopment(payload.state || {});
+    if (payload.state?.stage === 'reviewing') {
+      if (STATE.developmentTimer) clearTimeout(STATE.developmentTimer);
+      STATE.developmentTimer = setTimeout(() => refreshDevelopment(true), 2000);
+    }
+  } catch (error) {
+    if (!silent) toast(error.message, { type: 'error' });
+  }
+}
+
+async function runDevelopmentAction(action) {
+  if (!STATE.slug) return;
+  const buttons = ['btn-dev-review', 'btn-dev-repair', 'btn-dev-approve']
+    .map((id) => document.getElementById(id)).filter(Boolean);
+  buttons.forEach((button) => { button.disabled = true; });
+  try {
+    const payload = await api(
+      `/api/tasks/${encodeURIComponent(STATE.slug)}/development/${action}`,
+      { method: 'POST', body: '{}' },
+    );
+    renderDevelopment(payload.state || {});
+    if (action === 'repair') {
+      await refreshClaudeSessions();
+      startPanePolling();
+      toast('Fresh repair session started.', { type: 'success' });
+    } else if (action === 'review') {
+      toast('Reviewer A and B started on the committed checkpoint.', { type: 'success' });
+      if (STATE.developmentTimer) clearTimeout(STATE.developmentTimer);
+      STATE.developmentTimer = setTimeout(() => refreshDevelopment(true), 1500);
+    } else {
+      toast('Checkpoint approved. Loom did not push or merge it.', { type: 'success' });
+    }
+  } catch (error) {
+    toast(error.message, { type: 'error', ttl: 7000 });
+    await refreshDevelopment(true);
+  }
+}
+
+document.getElementById('btn-dev-refresh')?.addEventListener('click', () => refreshDevelopment());
+document.getElementById('btn-dev-review')?.addEventListener('click', () => runDevelopmentAction('review'));
+document.getElementById('btn-dev-repair')?.addEventListener('click', () => runDevelopmentAction('repair'));
+document.getElementById('btn-dev-approve')?.addEventListener('click', () => runDevelopmentAction('approve'));
 
 // ===== AR (Automated Research) =====
 //
@@ -4822,7 +5026,7 @@ document.getElementById('btn-new-task').addEventListener('click', async () => {
   btn.disabled = true;
   status.textContent = 'Creating…';
   try {
-    const special = agent === 'ar' || agent === 'author';
+    const special = agent === 'ar' || agent === 'author' || agent === 'development';
     const body = {
       title,
       general_goal,
@@ -4840,6 +5044,12 @@ document.getElementById('btn-new-task').addEventListener('click', async () => {
         btn.disabled = false;
         return;
       }
+    }
+    if (agent === 'development') {
+      body.kind = 'development';
+      body.development_test_command = $('#development-test-command')?.value.trim() || '';
+      body.development_max_rounds = Number($('#development-max-rounds')?.value || 2);
+      body.development_reviewer_model = interviewModel || 'grok-4.7-high-fast';
     }
     if (agent === 'ar') {
       body.kind = 'ar';

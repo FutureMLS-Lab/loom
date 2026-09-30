@@ -7,7 +7,7 @@
   <link rel="icon" type="image/png" href="/static/loom-logo.png" />
   <link rel="stylesheet" href="/static/vendor/xterm.css?v=5.5.0" />
   <link rel="stylesheet" href="/static/vendor/katex/katex.min.css" />
-  <link rel="stylesheet" href="/static/app.css?v=20260825-2" />
+  <link rel="stylesheet" href="/static/app.css?v=20260929-1" />
 </head>
 <body>
   <header class="topbar">
@@ -225,6 +225,28 @@
           <div id="changes-body" class="changes-body"></div>
         </section>
 
+        <section class="tab-panel" data-panel="development" role="tabpanel" hidden>
+          <div class="dev-toolbar">
+            <div>
+              <strong>Development workflow</strong>
+              <span class="stage-badge" id="dev-stage-badge" data-state="unknown">…</span>
+              <span class="tab-panel__hint" id="dev-round-status"></span>
+            </div>
+            <div class="dev-actions">
+              <button type="button" class="btn btn--sm" id="btn-dev-refresh">Refresh</button>
+              <button type="button" class="btn btn--primary btn--sm" id="btn-dev-review">Run reviewers</button>
+              <button type="button" class="btn btn--sm" id="btn-dev-repair">Start repair</button>
+              <button type="button" class="btn btn--primary btn--sm" id="btn-dev-approve">Approve for merge</button>
+            </div>
+          </div>
+          <p class="tab-panel__hint" id="dev-hint">
+            The implementer is the only writer. Reviewers inspect an immutable commit and never push or merge.
+          </p>
+          <div class="dev-summary" id="dev-summary"></div>
+          <div class="dev-reviewer-grid" id="dev-reviewer-grid"></div>
+          <div class="dev-findings" id="dev-findings"></div>
+        </section>
+
         <section class="tab-panel" data-panel="ar" role="tabpanel" hidden>
           <p class="tab-panel__hint">
             Automated research on <code id="ar-direction-label">…</code> ·
@@ -338,10 +360,19 @@
           <option value="cursor">Cursor Agent — agent CLI, resume by chat ID</option>
           <option value="claude">Claude — claude CLI, resume by UUID</option>
           <option value="codex">Codex — codex CLI, codex resume &lt;id&gt;</option>
+          <option value="development">Development — implement, then two independent code reviews</option>
           <option value="author">Author — finish an existing paper and its experiments</option>
           <option value="ar">AR — automated research (paper pipeline)</option>
         </select>
         <p class="create-agent-hint" id="new-agent-hint"></p>
+
+        <div class="ar-create" id="development-create-fields" hidden>
+          <label for="development-test-command">Test command (optional)</label>
+          <input type="text" id="development-test-command" class="modal-input-wide" placeholder="e.g. pytest -q or npm test" spellcheck="false" />
+          <label for="development-max-rounds">Maximum review rounds</label>
+          <input type="number" id="development-max-rounds" class="modal-input-wide" min="1" max="5" value="2" />
+          <p class="skills-note">One Cursor implementer owns the worktree. Reviewer A imports the correctness/testing SDE skill; Reviewer B imports the architecture/operational-risk SDE skill. Both review the same committed SHA with the selected model.</p>
+        </div>
 
         <div class="ar-create" id="author-create-fields" hidden>
           <div class="ar-create__row">
@@ -565,6 +596,6 @@
   <script src="/static/vendor/addon-fit.js?v=0.10.0"></script>
   <script src="/static/vendor/katex/katex.min.js"></script>
 <script src="/static/vendor/katex/auto-render.min.js"></script>
-<script src="/static/app.js?v=20260825-1"></script>
+<script src="/static/app.js?v=20260929-1"></script>
 </body>
 </html>

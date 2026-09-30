@@ -21,6 +21,7 @@ REPO = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO))
 
 from loom import ar_task as ar  # noqa: E402
+from loom import development_task as development  # noqa: E402
 from loom.paths import default_prompt_path  # noqa: E402
 from loom.rud_task import bundled_skills_path  # noqa: E402
 from loom.web import _available_skill_options, _skill_summary  # noqa: E402
@@ -46,11 +47,13 @@ def _cell(text: str, limit: int = 120) -> str:
 
 def render_section() -> str:
     picker = _available_skill_options(bundled_skills_path())
+    dev = development.skill_catalog()
     pipeline = ar.skill_catalog()
     lines: list[str] = [
         "",
-        f"Loom ships exactly {len(picker) + len(pipeline)} skills - "
-        f"{len(picker)} pick-and-read, {len(pipeline)} Paper-Factory. This "
+        f"Loom ships exactly {len(picker) + len(dev) + len(pipeline)} skills - "
+        f"{len(picker)} pick-and-read, {len(dev)} Development Task, "
+        f"{len(pipeline)} Paper-Factory. This "
         "generated table is the complete, authoritative set: a skill not "
         "listed here does not exist. Each description says when the skill "
         "applies; when your work matches one, READ its file at the path. To "
@@ -67,6 +70,18 @@ def render_section() -> str:
     for option in picker:
         summary = _cell(_skill_summary(Path(option["path"])))
         lines.append(f"| {option['label']} | {summary} | `{_rel(option['path'])}` |")
+    lines += [
+        "",
+        f"### Development Task skills ({len(dev)}) - the workflow injects each role itself",
+        "",
+        "| Skill | Role | What it does / when to use it | How it reaches the agent | Path |",
+        "|---|---|---|---|---|",
+    ]
+    for entry in dev:
+        lines.append(
+            f"| {entry['name']} | {entry['role']} | {_cell(entry['description'])} "
+            f"| {_cell(entry['injection'], 90)} | `{_rel(entry['path'])}` |"
+        )
     lines += [
         "",
         f"### Paper Factory (AR) skills ({len(pipeline)}) - the pipeline "

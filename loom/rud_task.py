@@ -531,7 +531,7 @@ class TaskMeta:
     # New tasks default to Cursor Agent. from_dict preserves Claude for legacy
     # task.json files that predate the `agent` field.
     agent: str = AGENT_CURSOR
-    # Task kind: "agent" (default), "author", "ar", or a legacy kind.
+    # Task kind: "agent" (default), "development", "author", "ar", or a legacy kind.
     kind: str = "agent"
     # ``worktree_path`` and ``branch`` are the *primary* worktree (also
     # mirrored at ``worktrees[0]`` / ``branches[0]``); the Claude pane

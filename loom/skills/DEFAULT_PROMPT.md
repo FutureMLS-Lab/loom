@@ -41,7 +41,7 @@ your task already injected in full need no second read. Paths are relative
 to the Loom checkout.
 
 <!-- SKILLS:BEGIN generated - edit skills, then run scripts/gen_skills_index.py -->
-Loom ships exactly 20 skills - 5 pick-and-read, 15 Paper-Factory. This generated table is the complete, authoritative set: a skill not listed here does not exist. Each description says when the skill applies; when your work matches one, READ its file at the path. To add a skill, put a markdown file under loom/skills/ (its frontmatter `description:` becomes its row here) and run scripts/gen_skills_index.py.
+Loom ships exactly 23 skills - 5 pick-and-read, 3 Development Task, 15 Paper-Factory. This generated table is the complete, authoritative set: a skill not listed here does not exist. Each description says when the skill applies; when your work matches one, READ its file at the path. To add a skill, put a markdown file under loom/skills/ (its frontmatter `description:` becomes its row here) and run scripts/gen_skills_index.py.
 
 ### Pick-and-read (5) - selectable at task creation, readable by anyone
 
@@ -52,6 +52,14 @@ Loom ships exactly 20 skills - 5 pick-and-read, 15 Paper-Factory. This generated
 | loom-hot-restart | Restarts a running Loom web service from an updated source checkout while preserving its authentication environment, di… | `loom/skills/dev/loom-hot-restart/SKILL.md` |
 | remote_control | loom Remote Control | `loom/skills/remote_control/remote_control.md` |
 | server_setup | Loom Agent Server Setup | `loom/skills/server_setup/server_setup.md` |
+
+### Development Task skills (3) - the workflow injects each role itself
+
+| Skill | Role | What it does / when to use it | How it reaches the agent | Path |
+|---|---|---|---|---|
+| sde-implementer | Implementer | Sole-writer engineering contract: test, commit a clean checkpoint, never push or merge. | Automatically added to every Development Task implementer. | `loom/skills/dev/sde-implementer/SKILL.md` |
+| sde-correctness-review | Reviewer A | Read-only correctness, edge-case, security, and regression-test review of an exact commit. | Injected only into Reviewer A's fresh headless session. | `loom/skills/dev/sde-correctness-review/SKILL.md` |
+| sde-architecture-review | Reviewer B | Read-only architecture, lifecycle, performance, and operational-risk review of an exact commit. | Injected only into Reviewer B's fresh headless session. | `loom/skills/dev/sde-architecture-review/SKILL.md` |
 
 ### Paper Factory (AR) skills (15) - the pipeline injects these itself
 
