@@ -29,8 +29,8 @@ every client below. Pass `--url` with the base URL *as the client sees Loom*
 
 Auth is a Bearer header. Give agents and bots the **agent token**
 (`~/.loom/agent/agent-token`, minted when the server starts; `export
-LOOM_AGENT_TOKEN=$(cat ~/.loom/agent/agent-token)`): it opens `/mcp`, the
-manifest, and the isolated terminal attach below — nothing else. The server's `--auth-token` still opens everything,
+LOOM_AGENT_TOKEN=$(cat ~/.loom/agent/agent-token)`): it opens `/mcp` and the
+manifest and nothing else. The server's `--auth-token` still opens everything,
 and is what the local stdio server uses.
 
 ```bash
@@ -84,47 +84,25 @@ an ambiguous fragment returns the candidates instead of guessing. The pane
 tools take either `task` or a raw `target` from `list_sessions`.
 
 `watch_pane` is the agent-shaped version of attaching to a terminal: the raw
-PTY stream is xterm redraw bytes, so the tool polls the rendered screen once a
-second instead. Keep `seconds` under the client's tool timeout (Codex defaults
-to 60).
-
-## Raw terminal attach (for bots that render a terminal)
-
-A bot that wants the live byte stream — to show a real terminal, or to type
-as a human would — attaches over HTTP with the agent token, the same protocol
-the browser terminal uses:
-
-```bash
-# open: chunked raw PTY bytes; the stream id comes back in a response header
-curl -sN -D - -H "Authorization: Bearer $LOOM_AGENT_TOKEN" \
-  "http://127.0.0.1:8765/api/tmux/stream?target=<session:window.pane>&cols=120&rows=40"
-#   X-Loom-Terminal-Stream: <stream_id>
-
-# type into it, keep it alive (the lease lapses after ~75 s of silence), close it
-curl -s -H "Authorization: Bearer $LOOM_AGENT_TOKEN" -d '{"stream_id":"<id>","text":"ls\r"}' \
-  http://127.0.0.1:8765/api/tmux/stream-input
-curl -s -H "Authorization: Bearer $LOOM_AGENT_TOKEN" -d '{"stream_id":"<id>"}' \
-  http://127.0.0.1:8765/api/tmux/stream-heartbeat
-curl -s -H "Authorization: Bearer $LOOM_AGENT_TOKEN" -d '{"stream_id":"<id>"}' \
-  http://127.0.0.1:8765/api/tmux/stream-close
-```
-
-A bot's attach is **isolated** (next section), and a bot may drive only the
-streams it opened — the owner's browser streams answer 403.
+PTY stream (`/api/tmux/stream`) is xterm redraw bytes meant for a browser, so
+the tool polls the rendered screen once a second instead. Keep `seconds`
+under the client's tool timeout (Codex defaults to 60).
 
 ## What agents do to your tmux windows
 
-| Access | Effect on the windows you are looking at |
-|--------|------------------------------------------|
-| `list_sessions`, `read_screen`, `watch_pane` | None. They run `tmux list-*` and `capture-pane`: no client attaches, nothing is resized or selected. |
-| `send_to_agent`, `send_keys` | They type into that one pane — that is the point. If you had scrolled up in that pane, tmux leaves copy-mode first so the keys reach the program, so your scroll position resets. Text goes through a private, self-deleting paste buffer, never your own. |
+No tool attaches a tmux client, so nothing an agent does can switch the window
+you are looking at or resize one.
+
+| Tools | Effect on the windows you are looking at |
+|-------|------------------------------------------|
+| `list_sessions`, `read_screen`, `watch_pane` | None: `tmux list-*` and `capture-pane` only. |
+| `send_to_agent`, `send_keys` | They type into that one pane — that is the point. If you had scrolled up in it, tmux leaves copy-mode first so the keys reach the program, so your view returns to the bottom; scrollback is kept. Text goes through a private, self-deleting paste buffer, never your own. |
 | `start_agent`, `stop_agent` | Create or kill that task's agent pane. |
-| Bot terminal attach | None. The browser attaches as a full tmux client, which makes the attached window current for every client and, under `window-size latest`, can resize it. A bot instead attaches through a throwaway session *grouped* with yours — shared windows, its own current window — as a client with `ignore-size` and `active-pane`. It never switches your window, never resizes one, never moves your active pane, and its grouped session destroys itself when it detaches (stale ones are reaped at startup). |
 
 ## Safety model
 
-- **A narrower key for bots.** The agent token opens `/mcp`, the manifest,
-  and isolated terminal attach — not the REST API behind them. OpenClaw's own docs warn that config
+- **A narrower key for bots.** The agent token opens `/mcp` and the manifest
+  only — not the REST API behind them. OpenClaw's own docs warn that config
   literals are readable by its agent; with this token, an agent that reads its
   config still holds only the curated tools. Tool calls reach the REST API
   over loopback with the server's own token.

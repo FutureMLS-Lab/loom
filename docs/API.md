@@ -114,10 +114,8 @@ setup: [AGENT-GATEWAY.md](AGENT-GATEWAY.md).
 | `GET` | `/api/agent/manifest` | Machine-readable connection info, URLs as the caller sees them |
 
 Both accept the scoped **agent token** (`~/.loom/agent/agent-token`) as well
-as the web token. The agent token also opens the four `/api/tmux/stream*`
-endpoints — a bot's attach is isolated (it never switches or resizes the
-owner's windows) and it may drive only its own streams — and nothing else.
-Browser-originated POSTs to `/mcp` must be same-origin.
+as the web token; nothing else accepts the agent token. Browser-originated
+POSTs to `/mcp` must be same-origin.
 
 ## Paper Factory (AR)
 
