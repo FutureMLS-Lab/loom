@@ -1,10 +1,13 @@
 import json
+import os
+import time
 
 from loom.web import (
     _AGENT_WORKING_RE,
     _conversation_terminal_answer_keys,
     _conversation_terminal_question,
     _parse_conversation_transcript,
+    _session_last_active,
 )
 
 
@@ -13,6 +16,45 @@ def _write_jsonl(path, rows) -> None:
         "".join(json.dumps(row, ensure_ascii=False) + "\n" for row in rows),
         encoding="utf-8",
     )
+
+
+def test_resumed_cursor_chat_ranks_by_its_transcript(tmp_path, monkeypatch) -> None:
+    monkeypatch.setenv("HOME", str(tmp_path))
+    work = tmp_path / "task" / "work"
+    work.mkdir(parents=True)
+    now = time.time()
+
+    def chat(chat_id: str, meta_age_h: float, transcript_age_h: float) -> dict:
+        meta = tmp_path / ".cursor" / "chats" / "workspace" / chat_id / "meta.json"
+        meta.parent.mkdir(parents=True)
+        meta.write_text(json.dumps({"cwd": str(work)}), encoding="utf-8")
+        meta_time = now - meta_age_h * 3600
+        os.utime(meta, (meta_time, meta_time))
+        encoded = str(work).lstrip("/").replace("/", "-")
+        transcript = (
+            tmp_path / ".cursor" / "projects" / encoded / "agent-transcripts"
+            / chat_id / f"{chat_id}.jsonl"
+        )
+        transcript.parent.mkdir(parents=True)
+        _write_jsonl(transcript, [{"role": "user", "message": {"content": "hi"}}])
+        transcript_time = now - transcript_age_h * 3600
+        os.utime(transcript, (transcript_time, transcript_time))
+        return {"id": chat_id, "path": str(meta), "mtime": meta_time, "size": 0}
+
+    # Started weeks ago and resumed just now: the transcript moves, meta.json
+    # does not. The other chat was opened more recently but left alone since.
+    resumed = chat("11111111-aaaa-4aaa-8aaa-111111111111", 300, 0.1)
+    idle = chat("22222222-bbbb-4bbb-8bbb-222222222222", 200, 200)
+
+    ranked = sorted(
+        [idle, resumed],
+        key=lambda session: _session_last_active(session, "cursor"),
+        reverse=True,
+    )
+
+    assert [session["id"] for session in ranked] == [resumed["id"], idle["id"]]
+    assert _session_last_active(resumed, "cursor") > now - 3600
+    assert _session_last_active(idle, "cursor") < now - 199 * 3600
 
 
 def test_agent_working_markers_cover_current_and_legacy_cursor_ui() -> None:

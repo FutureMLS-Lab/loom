@@ -74,6 +74,7 @@ from loom.web_conversation import (
     _conversation_terminal_question,
     _conversation_transcript_path,
     _parse_conversation_transcript,
+    _session_last_active,
 )
 from loom import ar_task as ar
 from loom import rebuttal_task as rebuttal
@@ -1383,6 +1384,10 @@ def make_handler(
                             "mtime": stat.st_mtime,
                             "size": stat.st_size,
                         }
+            # The conversation feed reads the first of these with a transcript,
+            # so the order has to be when each session last moved.
+            for info in files_by_id.values():
+                info["mtime"] = _session_last_active(info, agent)
             # Preserve task-meta order (history of who-was-spawned-when)
             # but enrich with on-disk info.
             ordered = []

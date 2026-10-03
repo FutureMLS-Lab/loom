@@ -451,6 +451,25 @@ def _conversation_transcript_path(
     return None
 
 
+def _session_last_active(session: dict[str, Any], agent: str) -> float:
+    """When *session* last moved: its session file, or its transcript if later.
+
+    Cursor keeps a chat's conversation in a transcript beside its
+    ``meta.json``, and a resumed chat writes the transcript without touching
+    ``meta.json``. Ranked by ``meta.json`` alone, the chat running in the pane
+    sorted below one last used weeks earlier, and the conversation feed showed
+    that one instead.
+    """
+    last = float(session.get("mtime") or 0.0)
+    transcript = _conversation_transcript_path(session, agent)
+    if transcript is not None:
+        try:
+            last = max(last, transcript.stat().st_mtime)
+        except OSError:
+            pass
+    return last
+
+
 def _parse_conversation_transcript(path: Path, agent: str) -> list[dict[str, Any]]:
     """Normalize Claude/Cursor JSONL into a small message protocol for clients."""
     try:
