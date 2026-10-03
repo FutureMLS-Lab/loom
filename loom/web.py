@@ -1314,8 +1314,8 @@ def make_handler(
                 return False
             if hmac.compare_digest(presented, required_token):
                 return True
-            # Bots hold a narrower credential: it opens the agent gateway
-            # (/mcp, /api/agent/*) and nothing else.
+            # Bots hold a narrower credential: it opens the MCP endpoint
+            # (and its manifest) and nothing else.
             return routes_agent.agent_token_allows(presented, urlparse(self.path).path)
 
         def _require_auth(self) -> bool:
@@ -1439,13 +1439,8 @@ def make_handler(
                 "/rebuttal-factory.html",
                 "/terminal",
                 "/terminal.html",
-                "/agent",
-                "/agent.html",
             ):
-                if path.startswith("/agent"):
-                    # Chat with the Loom concierge (routes_agent / concierge.py).
-                    name = "agent.html"
-                elif path.startswith("/terminal"):
+                if path.startswith("/terminal"):
                     # The Agent Terminal as its own page: the factory pages
                     # iframe it to reuse the exact attach/input protocol.
                     name = "terminal.html"
@@ -3562,7 +3557,7 @@ def serve(
     # Mint the bots' scoped credential before the first request needs it.
     routes_agent.agent_token()
     print(
-        f"  Agents:           MCP at http://{host}:{port}/mcp, chat at /agent;"
+        f"  Agents:           MCP at http://{host}:{port}/mcp;"
         f" bot token {routes_agent.agent_token_path()}  (`loom agent-config`)",
         flush=True,
     )

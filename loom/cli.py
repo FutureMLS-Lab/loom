@@ -346,8 +346,8 @@ def web_cmd(
 
 
 # --- agents and bots ----------------------------------------------------------
-# Three doors onto the same tool catalog (loom/agent_tools.py): MCP over stdio
-# for local agents, the concierge for anyone who just wants to talk, and a
+# Loom's tool catalog (loom/agent_tools.py) over MCP: stdio here for local
+# agents, Streamable HTTP at POST /mcp on the server for everyone else, and a
 # config printer so connecting a new client is copy-paste.
 
 
@@ -371,49 +371,6 @@ def mcp_cmd(
     serve_stdio(url, token)
 
 
-@app.command("ask")
-def ask_cmd(
-    message: list[str] = typer.Argument(..., help="Your question or instruction, in any language"),
-    new: bool = typer.Option(False, "--new", "-n", help="Start a fresh conversation"),
-    session: str = typer.Option("", "--session", "-s", help="Continue a specific conversation id"),
-    url: str | None = typer.Option(
-        None, "--url", envvar="LOOM_URL", help="Loom server URL (default http://127.0.0.1:8765)"
-    ),
-    token: str | None = typer.Option(
-        None, "--token", envvar="LOOM_WEB_AUTH_TOKEN", help="The server's --auth-token", show_default=False
-    ),
-) -> None:
-    """Ask the Loom concierge (Loom's server-side agent) in plain language.
-
-    Continues your last conversation unless --new is given.
-    """
-    from rich.markdown import Markdown
-
-    from loom.agent_tools import LoomClient, ToolError
-
-    last = Path.home() / ".loom" / "agent" / "last-session"
-    sid = session.strip() or ("" if new or not last.is_file() else last.read_text().strip())
-    body: dict[str, str] = {"message": " ".join(message)}
-    if sid:
-        body["session"] = sid
-    err = Console(stderr=True)
-    try:
-        with err.status("Loom is working…"):
-            data = LoomClient(url, token, timeout=960).post("/api/agent/chat", body)
-    except ToolError as exc:
-        err.print(f"[red]{exc}[/red]")
-        raise typer.Exit(1) from None
-    last.parent.mkdir(parents=True, exist_ok=True)
-    last.write_text(str(data.get("session") or ""))
-    console.print(Markdown(str(data.get("reply") or "(no reply)")))
-    cost = data.get("cost_usd")
-    err.print(
-        f"[dim]session {data.get('session')}"
-        + (f" · ${cost:.3f}" if isinstance(cost, (int, float)) else "")
-        + " · follow up with `loom ask …`, start over with --new[/dim]"
-    )
-
-
 @app.command("agent-config")
 def agent_config_cmd(
     url: str | None = typer.Option(
@@ -428,10 +385,9 @@ def agent_config_cmd(
 ) -> None:
     """Print ready-to-paste configs that connect agents and bots to Loom.
 
-    Remote agents and bots get the *agent token*: it opens /mcp and
-    /api/agent/* and nothing else, so a bot can never reach deletes or raw
-    keystrokes even if its config leaks. Only the local stdio server uses
-    the full web token.
+    Remote agents and bots get the *agent token*: it opens /mcp and nothing
+    else, so a bot can never reach deletes or raw keystrokes even if its
+    config leaks. Only the local stdio server uses the full web token.
     """
     from loom.routes_agent import agent_token, agent_token_path
 
@@ -452,13 +408,11 @@ def agent_config_cmd(
             "loom": {"url": f"{base}/mcp", "headers": {"Authorization": "Bearer ${env:LOOM_AGENT_TOKEN}"}}
         }
     }
-    chat = '{"message": "what is waiting on me?"}'
     typer.echo(
         f"""# Loom agent gateway - {base}
 #   MCP (Streamable HTTP): {base}/mcp
-#   Concierge chat:        POST {base}/api/agent/chat  {{"message": ..., "session"?: ...}}
-#   Chat page:             {base}/agent   (owner login)
-#   Agent token:           {agent_token_path()}  - opens /mcp and /api/agent/* only
+#   Manifest:              {base}/api/agent/manifest
+#   Agent token:           {agent_token_path()}  - opens /mcp only
 #                          export LOOM_AGENT_TOKEN=$(cat {agent_token_path()})
 
 ## Claude Code
@@ -473,9 +427,6 @@ codex mcp add loom --url {base}/mcp --bearer-token-env-var LOOM_AGENT_TOKEN
 ## OpenClaw - run on the gateway host
 openclaw mcp add loom --url {base}/mcp --transport streamable-http --header "Authorization=Bearer {tok}" --approval auto
 openclaw mcp doctor loom --probe
-
-## Bots and scripts - just talk to the concierge
-curl -s -H "Authorization: Bearer {tok}" -H "Content-Type: application/json" -d '{chat}' {base}/api/agent/chat
 
 ## Local stdio clients on this host (Claude Desktop, ...) - full web token
 {json.dumps(stdio, indent=2)}

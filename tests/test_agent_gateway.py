@@ -1,21 +1,19 @@
-"""Agent gateway: the tool catalog, the MCP server, the concierge, and routes."""
+"""Agent gateway: the tool catalog, the MCP server, its routes, and the agent token."""
 
 from __future__ import annotations
 
 import io
 import json
 import stat
-import subprocess
 import threading
 import urllib.error
 import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-from pathlib import Path
 from urllib.parse import urlparse
 
 import pytest
 
-from loom import concierge, mcp_server, routes_agent
+from loom import agent_tools, mcp_server, routes_agent
 from loom.agent_tools import TOOLS, LoomClient, ToolError, call_tool
 
 # --- a canned Loom ------------------------------------------------------------------
@@ -112,6 +110,14 @@ ROUTES = {
         "review": "# Panel\n\n# Reviewer: `gpt-5.6`\n\ngpt says scale up\n\n---\n\n# Reviewer: `kimi-k3-max`\n\nkimi says decompose",
     },
     ("POST", "/api/tasks/xorl-dev/claude/send"): {"ok": True},
+    ("GET", "/api/tmux/sessions"): {
+        "tmux": True,
+        "sessions": [{"name": "loom-cursor-p1-kv", "attached": "1"}, {"name": "scratch", "attached": "0"}],
+    },
+    ("GET", "/api/tmux/panes"): lambda params, body: {"panes": [{"id": f"{params['session']}:0.0", "title": "bash"}]},
+    ("GET", "/api/tmux/capture"): {"ok": True, "text": "agent idle\n"},
+    ("POST", "/api/tmux/send-key"): {"ok": True},
+    ("POST", "/api/tmux/send-text"): {"ok": True},
 }
 
 
@@ -146,14 +152,15 @@ def test_catalog_is_well_formed_and_never_destructive_by_accident():
         assert set(tool.required) <= set(tool.properties)
         assert tool.description and tool.title
         assert set(tool.annotations()) >= {"readOnlyHint", "destructiveHint", "idempotentHint", "openWorldHint"}
-        # Deletes, merges, pushes, and raw keystrokes stay human-only.
-        assert not any(word in tool.name for word in ("delete", "remove", "merge", "push", "keys"))
+        # Deletes, merges, and pushes stay human-only.
+        assert not any(word in tool.name for word in ("delete", "remove", "merge", "push"))
     read_only = {t.name for t in TOOLS if t.read_only}
     assert read_only == {
         "loom_status", "list_projects", "list_tasks", "get_task", "read_conversation",
-        "read_screen", "paper_factory", "get_paper", "read_review", "get_review_report",
+        "list_sessions", "read_screen", "watch_pane", "paper_factory", "get_paper",
+        "read_review", "get_review_report",
     }
-    assert {t.name for t in TOOLS if t.destructive} == {"stop_agent"}
+    assert {t.name for t in TOOLS if t.destructive} == {"stop_agent", "send_keys"}
 
 
 def test_locate_task_takes_fragments_and_refuses_to_guess():
@@ -232,6 +239,72 @@ def test_client_reports_unreachable_server_plainly():
         client.get("/api/projects")
 
 
+# --- tmux tools ------------------------------------------------------------------------
+
+
+def test_list_sessions_names_the_owning_task():
+    listing, err = _run("list_sessions")
+    assert not err and listing["count"] == 2
+    owned = {s["session"]: s["task"] for s in listing["sessions"]}
+    assert owned == {"loom-cursor-p1-kv": f"ar/{PAPER}", "scratch": ""}
+    one, err = _run("list_sessions", {"session": "scratch"})
+    assert one["sessions"][0]["panes"] == [{"target": "scratch:0.0", "title": "bash"}]
+    assert _run("list_sessions", {"session": "nope"})[1]
+
+
+def test_screen_tools_take_a_task_or_any_pane():
+    client = FakeClient()
+    by_task, err = _run("read_screen", {"task": "selection-error"}, client)
+    assert not err and by_task["pane"] == "loom-cursor-p1-kv:0.0" and by_task["of"] == PAPER
+    by_target, err = _run("read_screen", {"target": "scratch:0.0"}, client)
+    assert not err and by_target["pane"] == "scratch:0.0"
+    text, err = _run("read_screen", {"target": "scratch; rm -rf /"})
+    assert err and "session:window.pane" in text
+    assert _run("read_screen", {})[1]
+
+
+def test_watch_pane_returns_when_the_screen_matches(monkeypatch):
+    screens = iter(["building...", "building... 50%", "tests PASSED", "never read"])
+
+    class Clock:
+        now = 0.0
+
+        def monotonic(self):
+            return self.now
+
+        def sleep(self, secs):
+            self.now += secs
+
+    monkeypatch.setattr(agent_tools, "time", Clock())
+    routes = dict(ROUTES)
+    routes[("GET", "/api/tmux/capture")] = lambda params, body: {"ok": True, "text": next(screens)}
+    watched, err = _run("watch_pane", {"target": "scratch:0.0", "until": "PASSED|FAILED", "seconds": 30}, FakeClient(routes))
+    assert not err
+    assert watched["until_matched"] is True and watched["changed"] is True
+    assert watched["screen"] == "tests PASSED" and watched["watched_seconds"] == 2.0
+    routes[("GET", "/api/tmux/capture")] = {"ok": True, "text": "still idle"}
+    idle, err = _run("watch_pane", {"target": "scratch:0.0", "until": "PASSED", "seconds": 3}, FakeClient(routes))
+    assert idle["until_matched"] is False and idle["changed"] is False and idle["watched_seconds"] == 3.0
+    assert _run("watch_pane", {"target": "scratch:0.0", "until": "("})[1]
+
+
+def test_send_keys_validates_then_presses_in_order():
+    client = FakeClient()
+    result, err = _run("send_keys", {"task": PAPER, "keys": ["Escape", "C-c", "Down", "Enter"]}, client)
+    assert not err and result["sent_keys"] == ["Escape", "C-c", "Down", "Enter"]
+    pressed = [c[3]["key"] for c in client.calls if c[1] == "/api/tmux/send-key"]
+    assert pressed == ["Escape", "C-c", "Down", "Enter"]
+    text, err = _run("send_keys", {"target": "scratch:0.0", "keys": ["rm -rf /"]})
+    assert err and "unsupported key" in text
+
+
+def test_send_to_agent_reaches_any_pane_by_target():
+    client = FakeClient()
+    result, err = _run("send_to_agent", {"target": "scratch:0.0", "text": "make test"}, client)
+    assert not err and result["to"] == "scratch:0.0"
+    assert ("POST", "/api/tmux/send-text", {}, {"target": "scratch:0.0", "text": "make test", "submit": True}) in client.calls
+
+
 # --- MCP protocol -------------------------------------------------------------------
 
 
@@ -308,92 +381,6 @@ def test_stdio_transport(monkeypatch):
     assert "ar" in replies[2]["result"]["content"][0]["text"]
 
 
-# --- concierge ------------------------------------------------------------------------
-
-
-@pytest.fixture()
-def agent_home(tmp_path, monkeypatch):
-    monkeypatch.setenv(concierge.HOME_ENV, str(tmp_path / "agent"))
-    monkeypatch.setenv(concierge.WORKDIR_ENV, str(tmp_path / "work"))
-    monkeypatch.setenv("LOOM_WEB_AUTH_TOKEN", "secret-web-token")
-    return tmp_path
-
-
-class FakeCLI:
-    def __init__(self, replies):
-        self.replies = list(replies)
-        self.calls: list[dict] = []
-
-    def __call__(self, command, **kwargs):
-        self.calls.append({"command": command, **kwargs})
-        reply = self.replies.pop(0)
-        if isinstance(reply, subprocess.CompletedProcess):
-            return reply
-        return subprocess.CompletedProcess(command, 0, stdout=json.dumps(reply), stderr="")
-
-
-def _ok(text, session="cli-session-1"):
-    return {"type": "result", "is_error": False, "result": text, "session_id": session, "total_cost_usd": 0.01, "num_turns": 2}
-
-
-def test_conversation_keeps_context_across_turns(agent_home):
-    cli = FakeCLI([_ok("two things wait on you"), _ok("gpt-5.6 scored lowest")])
-    first = concierge.chat("what waits on me?", base_url="http://127.0.0.1:8765", token="tok", runner=cli)
-    assert first["reply"] == "two things wait on you"
-    command = cli.calls[0]["command"]
-    assert "--session-id" in command and "--resume" not in command
-    assert cli.calls[0]["input"] == "what waits on me?"
-    assert "what waits on me?" not in command  # stdin, not argv
-    second = concierge.chat("which reviewer was lowest?", first["session"], base_url="http://127.0.0.1:8765", token="tok", runner=cli)
-    assert second["session"] == first["session"]
-    resumed = cli.calls[1]["command"]
-    assert resumed[resumed.index("--resume") + 1] == "cli-session-1"
-    record = concierge.read_session(first["session"])
-    assert [t["role"] for t in record["turns"]] == ["user", "assistant", "user", "assistant"]
-    assert concierge.list_sessions()[0]["turns"] == 2
-
-
-def test_the_cli_is_fenced_to_loom_tools(agent_home):
-    cli = FakeCLI([_ok("ok")])
-    concierge.chat("hi", base_url="http://127.0.0.1:8765", token="s3cr3t-bearer-9f2", runner=cli)
-    call = cli.calls[0]
-    command = call["command"]
-    assert command[command.index("--tools") + 1] == ""
-    assert "--strict-mcp-config" in command
-    assert command[command.index("--allowedTools") + 1] == "mcp__loom"
-    assert command[command.index("--setting-sources") + 1] == "project"
-    assert "s3cr3t-bearer-9f2" not in " ".join(command)  # the token lives in the 0600 config file
-    assert "LOOM_WEB_AUTH_TOKEN" not in call["env"]
-    config = Path(command[command.index("--mcp-config") + 1])
-    assert stat.S_IMODE(config.stat().st_mode) == 0o600
-    server = json.loads(config.read_text())["mcpServers"]["loom"]
-    assert server == {"type": "http", "url": "http://127.0.0.1:8765/mcp", "headers": {"Authorization": "Bearer s3cr3t-bearer-9f2"}}
-
-
-def test_default_workdir_stays_outside_home(monkeypatch):
-    monkeypatch.delenv(concierge.WORKDIR_ENV, raising=False)
-    assert Path.home() not in concierge.workdir().resolve().parents
-
-
-def test_failures_raise_and_leave_no_half_turn(agent_home):
-    cli = FakeCLI([subprocess.CompletedProcess([], 1, stdout="", stderr="auth expired")])
-    with pytest.raises(concierge.ConciergeError, match="auth expired"):
-        concierge.chat("hi", base_url="http://127.0.0.1:8765", token="tok", runner=cli)
-    assert concierge.list_sessions() == []
-    cli = FakeCLI([{"type": "result", "is_error": True, "result": "rate limited"}])
-    with pytest.raises(concierge.ConciergeError, match="rate limited"):
-        concierge.chat("hi", base_url="http://127.0.0.1:8765", token="tok", runner=cli)
-
-
-def test_input_validation(agent_home):
-    with pytest.raises(ValueError):
-        concierge.chat("   ", base_url="x", token="t", runner=FakeCLI([]))
-    with pytest.raises(ValueError, match="session"):
-        concierge.chat("hi", "../../etc/passwd", base_url="x", token="t", runner=FakeCLI([]))
-    assert concierge.read_session("../x") is None
-    assert concierge.delete_session("../x") is False
-
-
 # --- routes over real HTTP -----------------------------------------------------------
 
 
@@ -426,7 +413,7 @@ class _Handler(BaseHTTPRequestHandler):
 
 
 @pytest.fixture()
-def server(monkeypatch, agent_home):
+def server(monkeypatch):
     monkeypatch.setattr(routes_agent, "LoomClient", lambda *a, **k: FakeClient())
     httpd = ThreadingHTTPServer(("127.0.0.1", 0), _Handler)
     thread = threading.Thread(target=httpd.serve_forever, daemon=True)
@@ -460,37 +447,12 @@ def test_mcp_route(server):
     assert _http(f"{server}/mcp", "POST", init, {"Origin": f"http://{host}"})[0] == 200
 
 
-def test_chat_route_and_sessions(server, monkeypatch):
-    seen = {}
-
-    def fake_chat(message, session, **kwargs):
-        seen.update(message=message, session=session, **kwargs)
-        return {"ok": True, "session": "a" * 32, "reply": "hello"}
-
-    monkeypatch.setattr(concierge, "chat", fake_chat)
-    status, _, body = _http(f"{server}/api/agent/chat", "POST", {"message": "hi"})
-    assert status == 200 and json.loads(body)["reply"] == "hello"
-    assert seen["message"] == "hi" and seen["session"] is None and seen["token"] == "tok"
-    assert seen["base_url"].startswith("http://127.0.0.1:")
-    assert _http(f"{server}/api/agent/chat", "POST", b"[1, 2]")[0] == 400
-
-    def failing(*a, **k):
-        raise concierge.ConciergeError("cli missing")
-
-    monkeypatch.setattr(concierge, "chat", failing)
-    status, _, body = _http(f"{server}/api/agent/chat", "POST", {"message": "hi"})
-    assert status == 502 and "cli missing" in json.loads(body)["error"]
-    status, _, body = _http(f"{server}/api/agent/sessions")
-    assert status == 200 and json.loads(body)["sessions"] == []
-    assert _http(f"{server}/api/agent/sessions/{'b' * 32}")[0] == 404
-
-
 def test_manifest_speaks_from_the_callers_side(server):
     status, _, body = _http(f"{server}/api/agent/manifest", headers={"Host": "127.0.0.1:18766"})
     data = json.loads(body)
     assert status == 200
     assert data["mcp"]["url"] == "http://127.0.0.1:18766/mcp"
-    assert data["chat"]["url"] == "http://127.0.0.1:18766/api/agent/chat"
+    assert "chat" not in data
     assert len(data["tools"]) == len(TOOLS)
     assert "Bearer tok" not in json.dumps(data)  # describes auth, never leaks the token
 
@@ -518,9 +480,9 @@ def test_agent_token_is_private_and_stable(fresh_token):
 
 def test_agent_token_opens_only_the_gateway(fresh_token, monkeypatch):
     token = routes_agent.agent_token()
-    for path in ("/mcp", "/api/agent/chat", "/api/agent/manifest", "/api/agent/sessions/" + "a" * 32):
+    for path in ("/mcp", "/api/agent/manifest"):
         assert routes_agent.agent_token_allows(token, path), path
-    for path in ("/api/tasks", "/api/tasks/x/claude/send", "/api/projects", "/", "/agent", "/mcpx"):
+    for path in ("/api/tasks", "/api/tasks/x/claude/send", "/api/projects", "/", "/api/agent/chat", "/mcpx"):
         assert not routes_agent.agent_token_allows(token, path), path
     assert not routes_agent.agent_token_allows("wrong", "/mcp")
     assert not routes_agent.agent_token_allows("", "/mcp")

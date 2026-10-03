@@ -1,8 +1,7 @@
 """Loom as a set of typed tools for agents and bots.
 
-One catalog serves every machine client: the MCP server (``loom mcp`` over
-stdio, ``POST /mcp`` over Streamable HTTP) and the server-side concierge that
-answers chat at ``/api/agent/chat``. Each tool is a thin wrapper over the
+One catalog behind Loom's MCP server (``loom mcp`` over stdio, ``POST /mcp``
+over Streamable HTTP). Each tool is a thin wrapper over the
 documented REST API (docs/API.md), so the running server stays the single
 source of truth - and each one *summarizes*: a raw task payload runs to half
 a megabyte and a paper's AR state to ~80 KB, so tools return what an agent
@@ -19,6 +18,8 @@ from __future__ import annotations
 
 import json
 import os
+import re
+import time
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -26,6 +27,8 @@ from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any
+
+from loom.tmux_util import _KEY_RE, _KEYS, _TARGET_RE
 
 DEFAULT_URL = "http://127.0.0.1:8765"
 URL_ENV = "LOOM_URL"
@@ -368,16 +371,100 @@ def _read_conversation(client: LoomClient, args: dict[str, Any]) -> dict[str, An
     }
 
 
-def _read_screen(client: LoomClient, args: dict[str, Any]) -> dict[str, Any]:
-    pid, meta = client.locate_task(args.get("task"), args.get("project"))
+def _pane(client: LoomClient, args: dict[str, Any]) -> tuple[str, str]:
+    """``(tmux_target, label)`` from either a raw pane target or a task."""
+    target = str(args.get("target") or "").strip()
+    if target:
+        if not _TARGET_RE.match(target):
+            raise ToolError("target must look like session:window.pane - list_sessions shows them")
+        return target, target
+    if not args.get("task"):
+        raise ToolError("give either task (a Loom task) or target (any tmux pane, see list_sessions)")
+    _pid, meta = client.locate_task(args.get("task"), args.get("project"))
     target = str(meta.get("tmux_interview_target") or "")
     if not target:
         raise ToolError("this task has no agent pane yet - call start_agent first")
-    data = client.get("/api/tmux/capture", target=target, lines=_int(args.get("lines"), 60, 5, 400))
+    return target, str(meta["slug"])
+
+
+def _capture(client: LoomClient, target: str, lines: int) -> str:
+    data = client.get("/api/tmux/capture", target=target, lines=lines)
     if not isinstance(data, dict) or not data.get("ok"):
         error = data.get("error") if isinstance(data, dict) else data
-        raise ToolError(f"pane capture failed (is the agent running?): {error}")
-    return {"task": meta["slug"], "pane": target, "screen": _clip(str(data.get("text") or "").rstrip(), 16000)}
+        raise ToolError(f"pane capture failed (is {target} alive?): {error}")
+    return str(data.get("text") or "").rstrip()
+
+
+def _read_screen(client: LoomClient, args: dict[str, Any]) -> dict[str, Any]:
+    target, label = _pane(client, args)
+    screen = _capture(client, target, _int(args.get("lines"), 60, 5, 400))
+    return {"pane": target, "of": label, "screen": _clip(screen, 16000)}
+
+
+def _watch_pane(client: LoomClient, args: dict[str, Any]) -> dict[str, Any]:
+    """Attach to a pane for a bounded window: the agent-readable live view.
+
+    The raw PTY stream is xterm redraw bytes; an agent wants the rendered
+    screen, so this polls it once a second until ``until`` matches or time
+    runs out.
+    """
+    target, label = _pane(client, args)
+    seconds = _int(args.get("seconds"), 15, 1, 110)
+    lines = _int(args.get("lines"), 60, 5, 400)
+    pattern = str(args.get("until") or "")
+    try:
+        until = re.compile(pattern, re.MULTILINE) if pattern else None
+    except re.error as exc:
+        raise ToolError(f"until is not a valid regex: {exc}") from None
+    first = screen = _capture(client, target, lines)
+    started = time.monotonic()
+    matched = bool(until and until.search(screen))
+    while not matched and time.monotonic() - started < seconds:
+        time.sleep(1.0)
+        screen = _capture(client, target, lines)
+        matched = bool(until and until.search(screen))
+    return {
+        "pane": target,
+        "of": label,
+        "watched_seconds": round(time.monotonic() - started, 1),
+        "until_matched": matched if until else None,
+        "changed": screen != first,
+        "screen": _clip(screen, 16000),
+    }
+
+
+def _list_sessions(client: LoomClient, args: dict[str, Any]) -> dict[str, Any]:
+    data = client.get("/api/tmux/sessions")
+    if not isinstance(data, dict) or not data.get("tmux"):
+        raise ToolError("tmux is not available on the Loom host")
+    # Which Loom task owns each session, from every task's pane target.
+    names = client.project_names()
+    owners: dict[str, str] = {}
+    for pid in names:
+        for meta in client.tasks(pid):
+            target = str(meta.get("tmux_interview_target") or "")
+            if target:
+                owners[target.split(":", 1)[0]] = f"{names[pid]}/{meta.get('slug')}"
+    wanted = str(args.get("session") or "").strip()
+    sessions = [
+        {
+            "session": s.get("name"),
+            "attached": str(s.get("attached")) not in ("0", "", "False", "false"),
+            "task": owners.get(str(s.get("name")), ""),
+        }
+        for s in data.get("sessions") or []
+        if not wanted or s.get("name") == wanted
+    ]
+    if wanted:
+        if not sessions:
+            raise ToolError(f"no tmux session named {wanted!r}")
+        panes = client.get("/api/tmux/panes", session=wanted).get("panes") or []
+        sessions[0]["panes"] = [{"target": p.get("id"), "title": p.get("title")} for p in panes]
+    return {
+        "count": len(sessions),
+        "sessions": sessions,
+        "hint": "pass session=<name> for its pane targets; read_screen / watch_pane / send_keys take target=<session:window.pane>",
+    }
 
 
 def _paper_row(child: dict[str, Any]) -> dict[str, Any]:
@@ -558,19 +645,42 @@ def _get_review_report(client: LoomClient, args: dict[str, Any]) -> dict[str, An
 
 
 def _send_to_agent(client: LoomClient, args: dict[str, Any]) -> dict[str, Any]:
-    pid, meta = client.locate_task(args.get("task"), args.get("project"))
     text = str(args.get("text") or "").strip()
     if not text:
         raise ToolError("text is required")
     submit = args.get("submit", True) is not False
-    client.post(f"/api/tasks/{_q(meta['slug'])}/claude/send", {"text": text, "submit": submit}, project=pid)
+    if args.get("target"):
+        target, label = _pane(client, args)
+        client.post("/api/tmux/send-text", {"target": target, "text": text, "submit": submit})
+    else:
+        pid, meta = client.locate_task(args.get("task"), args.get("project"))
+        label = str(meta["slug"])
+        client.post(f"/api/tasks/{_q(label)}/claude/send", {"text": text, "submit": submit}, project=pid)
     return {
         "ok": True,
-        "task": meta["slug"],
+        "to": label,
         "sent": _clip(text, 300),
         "submitted": submit,
-        "next": "give the agent a moment, then read_conversation or read_screen for its reply",
+        "next": "give it a moment, then read_conversation, read_screen, or watch_pane for the reply",
     }
+
+
+def _send_keys(client: LoomClient, args: dict[str, Any]) -> dict[str, Any]:
+    keys = args.get("keys")
+    if isinstance(keys, str):
+        keys = [keys]
+    if not isinstance(keys, list) or not keys or len(keys) > 20:
+        raise ToolError("keys must be a list of 1-20 key names, e.g. [\"Escape\"] or [\"C-c\"]")
+    bad = [k for k in keys if not isinstance(k, str) or (k not in _KEYS and not _KEY_RE.match(k))]
+    if bad:
+        raise ToolError(
+            f"unsupported key(s) {bad}; use {', '.join(sorted(_KEYS))}, "
+            "C-<letter>, M-<letter>, or F1-F12 (type text with send_to_agent)"
+        )
+    target, label = _pane(client, args)
+    for key in keys:
+        client.post("/api/tmux/send-key", {"target": target, "key": key})
+    return {"ok": True, "pane": target, "of": label, "sent_keys": keys}
 
 
 def _create_task(client: LoomClient, args: dict[str, Any]) -> dict[str, Any]:
@@ -700,6 +810,10 @@ _PROJECT = {
     "type": "string",
     "description": "Project id, name, or path. Optional - omit to search every project.",
 }
+_TARGET = {
+    "type": "string",
+    "description": "Any tmux pane as session:window.pane (from list_sessions); use instead of task.",
+}
 
 TOOLS: tuple[Tool, ...] = (
     Tool(
@@ -750,17 +864,42 @@ TOOLS: tuple[Tool, ...] = (
         required=("task",),
     ),
     Tool(
+        "list_sessions",
+        "List tmux sessions",
+        "Every tmux session on the Loom host, whether a client is attached, and which Loom "
+        "task owns it. Pass session to get that session's pane targets.",
+        {"session": {"type": "string", "description": "One session's name, to list its panes."}},
+        _list_sessions,
+    ),
+    Tool(
         "read_screen",
-        "Read agent screen",
-        "A snapshot of the task's live agent terminal (tmux pane) - what is on screen now, "
-        "including prompts the agent is blocked on.",
+        "Read pane screen",
+        "A snapshot of a tmux pane - a task's agent (task) or any pane (target) - "
+        "including prompts the program is blocked on.",
         {
             "task": _TASK,
             "project": _PROJECT,
+            "target": _TARGET,
             "lines": {"type": "integer", "minimum": 5, "maximum": 400, "description": "Scrollback lines (default 60)."},
         },
         _read_screen,
-        required=("task",),
+    ),
+    Tool(
+        "watch_pane",
+        "Watch a pane live",
+        "Attach to a pane and watch it live for up to `seconds`. Returns as soon as the "
+        "screen matches `until` (a regex, e.g. 'PASSED|FAILED' or a shell prompt), or when "
+        "time runs out - with the final screen and whether it changed. Keep `seconds` "
+        "under your client's tool timeout (often 60).",
+        {
+            "task": _TASK,
+            "project": _PROJECT,
+            "target": _TARGET,
+            "seconds": {"type": "integer", "minimum": 1, "maximum": 110, "description": "Longest wait (default 15)."},
+            "until": {"type": "string", "description": "Regex; stop as soon as the screen matches it."},
+            "lines": {"type": "integer", "minimum": 5, "maximum": 400, "description": "Lines to watch (default 60)."},
+        },
+        _watch_pane,
     ),
     Tool(
         "paper_factory",
@@ -804,18 +943,44 @@ TOOLS: tuple[Tool, ...] = (
     ),
     Tool(
         "send_to_agent",
-        "Send message to agent",
-        "Type a message into a task's live agent pane and submit it - the way to brief, "
-        "redirect, or answer a running coding agent. Only on the owner's request.",
+        "Send text to an agent or pane",
+        "Type a message into a task's live agent pane (task) or any tmux pane (target) and "
+        "press Enter - the way to brief, redirect, or answer a running agent or shell.",
         {
             "task": _TASK,
             "project": _PROJECT,
-            "text": {"type": "string", "description": "The message for the agent."},
+            "target": _TARGET,
+            "text": {"type": "string", "description": "The message or command line."},
             "submit": {"type": "boolean", "description": "Press Enter after typing (default true)."},
         },
         _send_to_agent,
-        required=("task", "text"),
+        required=("text",),
         read_only=False,
+        idempotent=False,
+    ),
+    Tool(
+        "send_keys",
+        "Send special keys",
+        "Press named keys in a pane, in order: Escape interrupts Claude Code / Codex / "
+        "Cursor; C-c stops a shell command; Up/Down/Enter/Tab drive menus and prompts; also "
+        "PageUp/PageDown, Home/End, BTab, Backspace, Space, any C-<letter>, M-<letter>, F1-F12. "
+        "Keys can approve prompts or kill processes - read_screen first.",
+        {
+            "task": _TASK,
+            "project": _PROJECT,
+            "target": _TARGET,
+            "keys": {
+                "type": "array",
+                "items": {"type": "string"},
+                "minItems": 1,
+                "maxItems": 20,
+                "description": "Key names, e.g. [\"Escape\"] or [\"Down\", \"Enter\"].",
+            },
+        },
+        _send_keys,
+        required=("keys",),
+        read_only=False,
+        destructive=True,
         idempotent=False,
     ),
     Tool(

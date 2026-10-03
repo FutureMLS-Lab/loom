@@ -1,40 +1,37 @@
-# Agent gateway — letting agents and bots talk to Loom
+# Agent gateway — Loom over MCP
 
 Loom is driven from a browser, but everything it knows — running agents,
-tasks, worktrees, the Paper / Review / Rebuttal factories — is equally useful
-to other agents and to chat bots. The gateway gives them two doors onto one
-tool catalog:
+tmux sessions, tasks, worktrees, the Paper / Review / Rebuttal factories — is
+equally useful to other agents and to bots. The gateway exposes it as an MCP
+server, so any MCP client can read and drive Loom with typed tools:
 
-| Door | For | Endpoint |
-|------|-----|----------|
-| **MCP** — typed tools | agents (Claude Code, Codex, Cursor, OpenClaw, Claude Desktop) | `POST /mcp` (Streamable HTTP) or `loom mcp` (stdio) |
-| **Concierge** — plain language | bots, scripts, phones, people | `POST /api/agent/chat`, the `/agent` page, `loom ask` |
+| Transport | For | How |
+|-----------|-----|-----|
+| Streamable HTTP | remote agents and bots (OpenClaw, Claude Code, Codex, Cursor) | `POST /mcp` on the running `loom web` |
+| stdio | local clients that launch servers as a subprocess (Claude Desktop, ...) | `loom mcp` |
 
 ```
- Slack ── OpenClaw ──┐                         ┌── loom_status, list_tasks, get_task,
- Claude Code ────────┼── MCP  /mcp ───────────┤   read_conversation, read_screen,
- Codex / Cursor ─────┘                         │   paper_factory, get_paper, read_review,
-                                               │   get_review_report, send_to_agent,
- curl / bots / phone ─┐                        │   create_task, start/stop_agent,
- /agent page ─────────┼─ /api/agent/chat ─ concierge ─┘   paper_loop, paper_gate, review_paper
- loom ask ────────────┘     (headless Claude Code, fenced to the loom tools)
-                                               │
-                                       Loom REST API  (single source of truth)
+ Slack ── OpenClaw ──┐
+ Claude Code ────────┼── POST /mcp ──┐
+ Codex / Cursor ─────┘               ├── 20 tools (loom/agent_tools.py) ── Loom REST API
+ Claude Desktop ──── loom mcp ───────┘        (summarized, annotated)       (single source of truth)
 ```
 
-Code: `loom/agent_tools.py` (catalog), `loom/mcp_server.py` (protocol),
-`loom/concierge.py` (chat agent), `loom/routes_agent.py` (HTTP).
+Code: `loom/agent_tools.py` (the catalog), `loom/mcp_server.py` (JSON-RPC,
+both transports, stdlib-only, stateless), `loom/routes_agent.py` (HTTP
+routes and the agent token).
 
 ## Connect a client
 
 Run `loom agent-config` on the Loom host: it prints ready-to-paste setups for
 every client below. Pass `--url` with the base URL *as the client sees Loom*
 (for OpenClaw on the control host that is the tunnel end, `http://127.0.0.1:18766`).
+
 Auth is a Bearer header. Give agents and bots the **agent token**
-(`~/.loom/agent/agent-token`, created on first use, `export
-LOOM_AGENT_TOKEN=$(cat ~/.loom/agent/agent-token)`): it opens `/mcp` and
-`/api/agent/*` and nothing else. The server's `--auth-token` still opens
-everything, and is what the local stdio server uses.
+(`~/.loom/agent/agent-token`, minted when the server starts; `export
+LOOM_AGENT_TOKEN=$(cat ~/.loom/agent/agent-token)`): it opens `/mcp` and the
+manifest and nothing else. The server's `--auth-token` still opens everything,
+and is what the local stdio server uses.
 
 ```bash
 # Claude Code
@@ -51,76 +48,61 @@ openclaw mcp doctor loom --probe
 
 # Anything that launches stdio MCP servers (Claude Desktop, ...)
 LOOM_URL=http://127.0.0.1:8765 LOOM_WEB_AUTH_TOKEN=... loom mcp
-
-# Just talk to it
-loom ask "what is waiting on me?"          # continues your last conversation; --new to start over
-curl -s -H "Authorization: Bearer $LOOM_AGENT_TOKEN" -H "Content-Type: application/json" \
-  -d '{"message": "how is the KV-cache paper doing?"}' http://127.0.0.1:8765/api/agent/chat
 ```
 
-`GET /api/agent/manifest` describes the same endpoints machine-readably, with
-URLs rewritten to the `Host` the caller used.
+`GET /api/agent/manifest` describes the endpoint and tools machine-readably,
+with URLs rewritten to the `Host` the caller used.
 
 ## The tools
 
-Ten read-only tools and seven that change state. Each wraps a REST call and
+Twelve read-only tools and eight that change state. Each wraps REST calls and
 **summarizes**: a raw task payload is ~500 KB and a paper's AR state ~80 KB;
 tools return what an agent can act on (a paper is ~2.5 KB).
 
 | Tool | What it returns / does |
 |------|------------------------|
-| `loom_status` | Start here: agents working now, finished-and-unseen, every gate waiting on you |
+| `loom_status` | Start here: agents working now, finished-and-unseen, every gate waiting on the owner |
 | `list_projects` / `list_tasks` | Projects; tasks across projects with live status |
 | `get_task` | Goal, agent, worktrees (clean/dirty), PLAN.md |
-| `read_conversation` | The agent's latest messages, tool calls collapsed to counts |
-| `read_screen` | The live agent pane, including prompts it is blocked on |
+| `read_conversation` | A task agent's latest messages, tool calls collapsed to counts |
+| `list_sessions` | Every tmux session, attached or not, and which task owns it; one session's pane targets |
+| `read_screen` | Snapshot of a pane — a task's agent or any `session:window.pane` |
+| `watch_pane` | Attach for up to N seconds and watch live; returns early when the screen matches a regex |
 | `paper_factory` / `get_paper` | Studios and papers; one paper's rating trajectory, panel, gates, available actions |
 | `read_review` | A round's panel report — optionally one reviewer (`kimi`, `gpt`, `claude`) |
 | `get_review_report` | Review Factory results |
-| `send_to_agent` | Type a message into a task's agent pane and submit |
-| `create_task` / `start_agent` / `stop_agent` | Task lifecycle (`stop_agent` is marked destructive) |
+| `send_to_agent` | Type text into a task's agent pane or any pane, then Enter |
+| `send_keys` | Press named keys: `Escape` (interrupt an agent), `C-c`, arrows, `Enter`, `Tab`, `PageUp`, F-keys, ... |
+| `create_task` / `start_agent` / `stop_agent` | Task lifecycle |
 | `paper_loop` | Start / stop a paper's author–reviewer loop |
 | `paper_gate` | Record the owner's decision at a human gate |
 | `review_paper` | Review any arXiv / OpenReview / PDF link with the three-vendor panel |
 
 Tasks are named by slug or any unique fragment of a slug or title
 (`"selection-error"` finds the KV-cache paper in whichever project owns it);
-an ambiguous fragment returns the candidates instead of guessing.
+an ambiguous fragment returns the candidates instead of guessing. The pane
+tools take either `task` or a raw `target` from `list_sessions`.
+
+`watch_pane` is the agent-shaped version of attaching to a terminal: the raw
+PTY stream (`/api/tmux/stream`) is xterm redraw bytes meant for a browser, so
+the tool polls the rendered screen once a second instead. Keep `seconds`
+under the client's tool timeout (Codex defaults to 60).
 
 ## Safety model
 
-- **A narrower key for bots.** The agent token opens `/mcp` and
-  `/api/agent/*` only — not the REST API behind them. OpenClaw's own docs
-  warn that config literals are readable by its agent; with this token, an
-  agent that reads its config still holds only the curated tools. (Tools
-  reach the REST API over loopback with the server's own token.)
-- **No token, no tools.** Browser POSTs to `/mcp` and `/api/agent/chat` must
-  also be same-origin, so another site cannot drive them with a browser's
-  cached Basic credentials.
+- **A narrower key for bots.** The agent token opens `/mcp` and the manifest
+  only — not the REST API behind them. OpenClaw's own docs warn that config
+  literals are readable by its agent; with this token, an agent that reads its
+  config still holds only the curated tools. Tool calls reach the REST API
+  over loopback with the server's own token.
+- **No token, no tools.** Browser POSTs to `/mcp` must also be same-origin,
+  so another site cannot drive it with a browser's cached Basic credentials.
 - **Annotated tools.** Every tool carries MCP `readOnlyHint` /
-  `destructiveHint`. Codex app-server — and therefore OpenClaw — auto-approves
-  the read-only ones and asks before the rest.
+  `destructiveHint`; `send_keys` and `stop_agent` are marked destructive (a
+  key can approve a prompt or kill a process). Codex app-server — and so
+  OpenClaw — auto-approves the read-only tools and asks before the rest.
 - **What is absent on purpose:** deleting tasks / studios / projects,
-  worktree merge and push, raw keystrokes, file writes, and OpenReview
-  submission. Those stay human-only in the UI.
+  worktree merge and push, file writes, and OpenReview submission. Those
+  stay human-only in the UI.
 - **Gates are the owner's call.** `paper_gate` exists so a bot can relay a
-  decision you made ("approve the KV paper"); the concierge is instructed
-  never to decide one itself.
-
-## The concierge
-
-`concierge.py` runs one headless Claude Code turn per message — riding the
-host's existing login, no API key — fenced to Loom:
-
-- the Loom MCP server is its only toolset (`--strict-mcp-config`), built-in
-  shell/file tools are off (`--tools ""`), only `mcp__loom` is pre-approved;
-- it runs in `/tmp/loom-concierge` with user settings skipped, so it inherits
-  neither the host runbook (`~/CLAUDE.md`) nor the global agent-stop hook;
-- the token reaches the CLI through a 0600 MCP config file, never argv;
-- each conversation is one CLI session (`--session-id`, then `--resume`), so
-  follow-ups ("and which reviewer was lowest?") keep their context.
-
-Conversations live in `~/.loom/agent/sessions/`. `/agent?session=<id>` opens
-one in the browser. Tunables: `LOOM_CONCIERGE_MODEL` (default `sonnet`),
-`LOOM_CONCIERGE_CLI` (default `claude`), `LOOM_CONCIERGE_WORKDIR`,
-`LOOM_AGENT_HOME`. A typical turn takes 5–20 s and a few cents.
+  decision the owner made ("approve the KV paper"), never to decide one.
