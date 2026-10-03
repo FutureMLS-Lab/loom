@@ -44,6 +44,26 @@ It types the message into that task's live agent pane (auth header +
 `?project=<id>` apply). The full loop: **agent stops → OpenClaw pings you →
 you reply → the reply lands in the pane → the agent continues → repeat.**
 
+## Giving OpenClaw Loom's tools (MCP)
+
+Typing into panes is one direction. To let the OpenClaw agent *read* Loom —
+what is running, what an agent said, how a paper is doing — register Loom's
+MCP server once on the gateway host:
+
+```bash
+openclaw mcp add loom --url http://127.0.0.1:18766/mcp --transport streamable-http \
+  --header "Authorization=Bearer <loom agent token>" --approval auto
+openclaw mcp doctor loom --probe
+```
+
+Use the **agent token** (`~/.loom/agent/agent-token` on the Loom host), not
+the web token: it opens only `/mcp` and `/api/agent/*`, so the credential
+sitting in OpenClaw's config cannot reach the rest of the API.
+The tools carry MCP safety annotations, so OpenClaw's Codex runtime
+auto-approves the ten read-only ones and asks before the seven that change
+state. Or skip tools entirely and relay chat to the concierge:
+`POST /api/agent/chat {"message": ...}`. See [AGENT-GATEWAY.md](AGENT-GATEWAY.md).
+
 ## Gateway on another host
 
 Bridge the two with an SSH reverse tunnel from the Loom machine, then point

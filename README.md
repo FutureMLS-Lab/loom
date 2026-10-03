@@ -53,6 +53,12 @@ All three speak to the same server and auth token; [AGENT.md](AGENT.md) step 5
 covers making it reachable (SSH tunnel / Tailscale / Cloudflare Tunnel / your
 own domain).
 
+Agents and bots get their own door: Loom's tools over **MCP** (`POST /mcp`,
+or `loom mcp` over stdio) for Claude Code / Codex / Cursor / OpenClaw, and a
+**concierge** you can just talk to — the `/agent` page, `loom ask "what is
+waiting on me?"`, or `POST /api/agent/chat` from any bot. `loom agent-config`
+prints the setup for each client; see [docs/AGENT-GATEWAY.md](docs/AGENT-GATEWAY.md).
+
 ## Research Factory
 
 `/factory` — the front door to three production lines that share one panel
@@ -146,6 +152,8 @@ loom web --project /path --openclaw \
   gets written: studio steps, gates, the readiness gate, the reviewer panel.
 - **[docs/OPENCLAW.md](docs/OPENCLAW.md)** — notifications in Slack and
   replying to agents from there.
+- **[docs/AGENT-GATEWAY.md](docs/AGENT-GATEWAY.md)** — MCP tools and the
+  concierge: how agents and bots query and drive Loom, and the safety model.
 - **[docs/research-factory/arch.md](docs/research-factory/arch.md)** and
   **[docs/rebuttal-factory/arch.md](docs/rebuttal-factory/arch.md)** — each
   factory's full pipeline flowchart and module map, with its debt ledger

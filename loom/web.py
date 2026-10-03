@@ -45,6 +45,7 @@ from loom.web_jobs import (
     _rebuttal_resume_delivery_watchers,
     _sweep_stale_review_runs,
 )
+from loom import routes_agent
 from loom import routes_ar
 from loom import routes_rebuttal
 from loom import routes_review
@@ -1301,17 +1302,20 @@ def make_handler(
                 return True
             raw = self.headers.get("Authorization", "").strip()
             if raw.lower().startswith("bearer "):
-                token = raw[7:].strip()
-                return hmac.compare_digest(token, required_token)
-            if raw.lower().startswith("basic "):
-                encoded = raw[6:].strip()
+                presented = raw[7:].strip()
+            elif raw.lower().startswith("basic "):
                 try:
-                    decoded = base64.b64decode(encoded).decode("utf-8")
+                    decoded = base64.b64decode(raw[6:].strip()).decode("utf-8")
                 except (binascii.Error, ValueError, UnicodeDecodeError):
                     return False
-                _, _, password = decoded.partition(":")
-                return hmac.compare_digest(password, required_token)
-            return False
+                presented = decoded.partition(":")[2]
+            else:
+                return False
+            if hmac.compare_digest(presented, required_token):
+                return True
+            # Bots hold a narrower credential: it opens the agent gateway
+            # (/mcp, /api/agent/*) and nothing else.
+            return routes_agent.agent_token_allows(presented, urlparse(self.path).path)
 
         def _require_auth(self) -> bool:
             if self._is_authorized():
@@ -1430,8 +1434,13 @@ def make_handler(
                 "/rebuttal-factory.html",
                 "/terminal",
                 "/terminal.html",
+                "/agent",
+                "/agent.html",
             ):
-                if path.startswith("/terminal"):
+                if path.startswith("/agent"):
+                    # Chat with the Loom concierge (routes_agent / concierge.py).
+                    name = "agent.html"
+                elif path.startswith("/terminal"):
                     # The Agent Terminal as its own page: the factory pages
                     # iframe it to reuse the exact attach/input protocol.
                     name = "terminal.html"
@@ -1538,6 +1547,8 @@ def make_handler(
                 self._send(st, b, h)
                 return
 
+            if routes_agent.handle_get(self, path, parsed):
+                return
             if routes_tmux.handle_get(self, path, parsed):
                 return
             if routes_review.handle_get(self, path, parsed):
@@ -2036,6 +2047,8 @@ def make_handler(
                 return
             path = parsed.path
             if routes_ar.handle_raw_post(self, path, parsed):
+                return
+            if routes_agent.handle_raw_post(self, path, parsed):
                 return
             body = _read_json(self)
 
@@ -3286,6 +3299,8 @@ def make_handler(
             parsed = urlparse(self.path)
             path = parsed.path
 
+            if routes_agent.handle_delete(self, path, parsed):
+                return
             if routes_rebuttal.handle_delete(self, path, parsed):
                 return
             if routes_review.handle_delete(self, path, parsed):
@@ -3416,6 +3431,7 @@ def make_handler(
     Handler.terminal_streams = terminal_streams
     Handler.ar_manager = ar_manager
     Handler.claude_registry = claude_registry
+    Handler.auth_token = required_token
     return Handler
 
 
@@ -3538,6 +3554,13 @@ def serve(
     print(f"  Default skills:   {sk}", flush=True)
     print("  Tabs:             Claude, PLAN.md (per task) + Notes button (per project)", flush=True)
     print(f"  Auth:             {'enabled' if auth_token.strip() else 'disabled'}", flush=True)
+    # Mint the bots' scoped credential before the first request needs it.
+    routes_agent.agent_token()
+    print(
+        f"  Agents:           MCP at http://{host}:{port}/mcp, chat at /agent;"
+        f" bot token {routes_agent.agent_token_path()}  (`loom agent-config`)",
+        flush=True,
+    )
     print(f"  OpenClaw:         {openclaw_status(openclaw_client.config)}", flush=True)
     print("", flush=True)
     openclaw_client.emit(

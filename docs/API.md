@@ -22,6 +22,7 @@ the web console, loom-desktop, loom-app, OpenClaw agents, and your scripts.
 | `/review-factory` | Review Factory (panel-as-a-service) |
 | `/rebuttal-factory` | Auto Rebuttal Factory |
 | `/terminal?target=<pane>` | The Agent Terminal alone — factories iframe this |
+| `/agent` | Ask Loom — chat with the concierge (`?session=<id>` opens a conversation) |
 
 ## Projects and notes
 
@@ -102,6 +103,21 @@ capability replies are consumed by tmux instead of leaking into the agent).
 | `GET` | `/api/activity` | Which tasks are working / finished-unseen, per project |
 | `POST` | `/api/activity/ack` `{slug}` | Clear a finish once the user has looked |
 | `POST` | `/api/activity/finished` `{cwd, task_id?}` | Agent stop-hooks report a finish |
+
+## Agent gateway
+
+Agents and bots: typed tools over MCP, or plain-language chat with the
+concierge. Design and client setup: [AGENT-GATEWAY.md](AGENT-GATEWAY.md).
+
+| Method | URL | Purpose |
+|--------|-----|---------|
+| `POST` | `/mcp` | MCP over Streamable HTTP (JSON-RPC: `initialize`, `tools/list`, `tools/call`, ...); `GET`/`DELETE` answer 405 |
+| `POST` | `/api/agent/chat` `{message, session?, model?}` | One concierge turn → `{session, reply, cost_usd}`; reuse `session` to continue |
+| `GET` | `/api/agent/sessions` | Concierge conversations, newest first |
+| `GET` / `DELETE` | `/api/agent/sessions/<id>` | One conversation's transcript / forget it |
+| `GET` | `/api/agent/manifest` | Machine-readable connection info, URLs as the caller sees them |
+
+Browser-originated POSTs to `/mcp` and `/api/agent/chat` must be same-origin.
 
 ## Paper Factory (AR)
 
