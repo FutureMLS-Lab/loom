@@ -1,5 +1,4 @@
 import loom.doctor as doctor
-import loom.paths as paths
 
 
 def _by_name(report, name):
