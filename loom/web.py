@@ -1609,7 +1609,9 @@ def make_handler(
                         break
                 if ar_pid:
                     try:
-                        overview = self._ar_overview(Path(str(ar.ar_root())), ar_pid)
+                        overview = routes_ar._ar_overview(
+                            self, Path(str(ar.ar_root())), ar_pid
+                        )
                         papers = list(overview.get("orphans") or [])
                         for studio in overview.get("studios") or []:
                             papers.extend(studio.get("children") or [])
