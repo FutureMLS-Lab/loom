@@ -4,7 +4,8 @@
 - ``GET  /api/agent/manifest``  how an agent or bot connects to this server
 
 Everything sits behind the server's normal auth, and bots can hold a
-narrower credential (the agent token) that opens these two routes only.
+narrower credential (the agent token) that opens these routes plus the
+raw terminal attach (``/api/tmux/stream*``, isolated for bots) - nothing else.
 Browser-originated POSTs must also be same-origin, so a page on another
 site cannot drive the MCP tools with a browser's cached Basic credentials.
 """
@@ -26,7 +27,16 @@ from loom.mcp_server import MAX_BODY_BYTES, MCPDispatcher, handle_http_post
 from loom.web_util import _json_bytes
 
 AGENT_TOKEN_ENV = "LOOM_AGENT_TOKEN"
-AGENT_ROUTES = ("/mcp", "/api/agent/manifest")
+AGENT_ROUTES = (
+    "/mcp",
+    "/api/agent/manifest",
+    # Raw terminal attach. A bot's attach is isolated (routes_tmux /
+    # tmux_util.open_pane_attach), and it may drive only its own streams.
+    "/api/tmux/stream",
+    "/api/tmux/stream-input",
+    "/api/tmux/stream-close",
+    "/api/tmux/stream-heartbeat",
+)
 _agent_token_cache = ""
 
 
@@ -39,7 +49,7 @@ def agent_token() -> str:
 
     Separate from the web auth token, like the hook token: a bot needs Loom's
     curated MCP tools, not the whole REST API, so it gets a secret that opens
-    ``/mcp`` (and the manifest) and nothing else. Even if a bot's config is
+    ``/mcp``, the manifest, and an isolated terminal attach - nothing else. Even if a bot's config is
     readable by its own agent, this token cannot reach deletes, worktree
     pushes, or raw keystrokes. ``LOOM_AGENT_TOKEN`` overrides the generated
     one.
@@ -123,13 +133,21 @@ def manifest(self) -> dict[str, Any]:
         "version": __version__,
         "auth": {
             "header": "Authorization: Bearer <token>",
-            "bots": "the agent token - opens /mcp and this manifest only (`loom agent-config --show-token`)",
+            "bots": "the agent token - opens /mcp, this manifest, and isolated terminal attach (`loom agent-config --show-token`)",
             "owner": "the server's --auth-token opens everything",
         },
         "mcp": {
             "url": f"{base}/mcp",
             "transport": "streamable-http",
             "stdio": "loom mcp  (env: LOOM_URL, LOOM_WEB_AUTH_TOKEN)",
+        },
+        "attach": {
+            "open": f"GET {base}/api/tmux/stream?target=<session:window.pane>&cols=120&rows=40",
+            "stream": "chunked raw PTY bytes (xterm); response header X-Loom-Terminal-Stream = stream_id",
+            "input": f"POST {base}/api/tmux/stream-input {{stream_id, text}}",
+            "keepalive": f"POST {base}/api/tmux/stream-heartbeat {{stream_id}} at least every 60 s",
+            "close": f"POST {base}/api/tmux/stream-close {{stream_id}}",
+            "isolation": "agent-token attaches never switch windows or resize them for other clients",
         },
         "tools": [
             {"name": t.name, "title": t.title, "read_only": t.read_only} for t in TOOLS

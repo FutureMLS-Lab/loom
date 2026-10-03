@@ -4,8 +4,13 @@ from __future__ import annotations
 
 import io
 import json
+import os
+import shutil
 import stat
+import subprocess
 import threading
+import time
+import uuid
 import urllib.error
 import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -488,3 +493,132 @@ def test_agent_token_opens_only_the_gateway(fresh_token, monkeypatch):
     assert not routes_agent.agent_token_allows("", "/mcp")
     monkeypatch.setenv(routes_agent.AGENT_TOKEN_ENV, "from-env")
     assert routes_agent.agent_token_allows("from-env", "/mcp")
+
+
+# --- terminal attach for bots ---------------------------------------------------------
+
+
+def test_agent_token_opens_attach_but_no_other_tmux_route(fresh_token):
+    token = routes_agent.agent_token()
+    for path in ("/api/tmux/stream", "/api/tmux/stream-input", "/api/tmux/stream-close", "/api/tmux/stream-heartbeat"):
+        assert routes_agent.agent_token_allows(token, path), path
+    # Keys, text, captures and listings stay behind MCP's curated tools.
+    for path in ("/api/tmux/send-key", "/api/tmux/send-text", "/api/tmux/capture", "/api/tmux/sessions"):
+        assert not routes_agent.agent_token_allows(token, path), path
+
+
+def test_stream_registry_remembers_who_opened_a_stream():
+    from loom.web import _TerminalStreamRegistry
+
+    registry = _TerminalStreamRegistry()
+    read_end, write_end = os.pipe()
+    try:
+        stream = registry.register(write_end, owner="agent")
+        assert registry.owner(stream) == "agent"
+        assert registry.owner(registry.register(write_end)) == "web"
+        registry.unregister(stream, write_end)
+        assert registry.owner(stream) is None
+    finally:
+        os.close(read_end)
+        os.close(write_end)
+
+
+def test_bots_cannot_drive_the_owners_streams():
+    from loom import routes_tmux
+
+    class Registry:
+        def __init__(self, owner):
+            self._owner = owner
+
+        def owner(self, stream_id):
+            return self._owner
+
+    class Request:
+        via_agent_token = True
+
+    request = Request()
+    request.terminal_streams = Registry("web")
+    assert routes_tmux._foreign_stream(request, "a" * 32)
+    request.terminal_streams = Registry("agent")
+    assert not routes_tmux._foreign_stream(request, "a" * 32)
+    request.via_agent_token = False
+    request.terminal_streams = Registry("web")
+    assert not routes_tmux._foreign_stream(request, "a" * 32)  # the owner drives anything
+
+
+def _tmux(*args):
+    return subprocess.run(["tmux", *args], capture_output=True, text=True)
+
+
+def _owner_client(session, cols, rows):
+    """A real tmux client attached the way the owner's terminal would be."""
+    import fcntl
+    import pty
+    import struct
+    import termios
+
+    master, slave = pty.openpty()
+    fcntl.ioctl(master, termios.TIOCSWINSZ, struct.pack("HHHH", rows, cols, 0, 0))
+    proc = subprocess.Popen(
+        ["tmux", "attach-session", "-t", session],
+        stdin=slave, stdout=slave, stderr=slave, start_new_session=True,
+    )
+    os.close(slave)
+    return proc, master
+
+
+@pytest.mark.skipif(shutil.which("tmux") is None, reason="needs tmux")
+def test_isolated_attach_leaves_the_owners_view_alone():
+    from loom import tmux_util
+
+    session = f"loom-test-{uuid.uuid4().hex[:6]}"
+    _tmux("new-session", "-d", "-s", session, "-x", "200", "-y", "50")
+    owner = bot = None
+    try:
+        _tmux("new-window", "-t", session)
+        _tmux("select-window", "-t", f"{session}:1")
+        owner = _owner_client(session, 200, 50)
+        time.sleep(1.0)
+        def size(window):
+            return _tmux("display", "-p", "-t", f"{session}:{window}", "#{window_width}x#{window_height}").stdout.strip()
+
+        owner_size = size(1)  # what the owner's 200x50 terminal shows
+        bot = tmux_util.open_pane_attach(f"{session}:0.0", 80, 24, isolated=True)
+        assert bot[0] is not None
+        time.sleep(1.0)
+        # The owner still looks at window 1, and every window follows the
+        # owner's size - none shrinks to the bot's 80x24. (A plain attach
+        # switches the owner to window 0 and shrinks it to 80x23.)
+        assert _tmux("display", "-p", "-t", session, "#{window_index}").stdout.strip() == "1"
+        assert size(1) == owner_size
+        assert size(0) == owner_size
+        observers = [
+            name for name in _tmux("list-sessions", "-F", "#{session_name}").stdout.split()
+            if name.startswith(tmux_util.OBSERVER_PREFIX)
+        ]
+        assert observers
+        bot[0].terminate()
+        bot[0].wait(timeout=5)
+        time.sleep(0.5)
+        left = _tmux("list-sessions", "-F", "#{session_name}").stdout.split()
+        assert not set(observers) & set(left)  # gone with its client
+        assert session in left  # the shared windows are untouched
+    finally:
+        for proc in (owner, bot):
+            if proc and proc[0] is not None:
+                proc[0].terminate()
+                os.close(proc[1])
+        _tmux("kill-session", "-t", session)
+
+
+@pytest.mark.skipif(shutil.which("tmux") is None, reason="needs tmux")
+def test_stale_observer_sessions_are_reaped():
+    from loom import tmux_util
+
+    stale = f"{tmux_util.OBSERVER_PREFIX}{uuid.uuid4().hex[:8]}"
+    _tmux("new-session", "-d", "-s", stale)
+    try:
+        assert tmux_util.reap_stale_observers() >= 1
+        assert _tmux("has-session", "-t", stale).returncode != 0
+    finally:
+        _tmux("kill-session", "-t", stale)

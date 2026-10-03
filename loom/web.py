@@ -140,6 +140,7 @@ from loom.rud_task import (
 from loom.tmux_util import (
     capture_pane,
     reap_orphaned_attaches,
+    reap_stale_observers,
     send_pane_key,
     send_pane_text,
     tmux_subprocess_env,
@@ -1129,15 +1130,22 @@ class _TerminalStreamRegistry:
         self._masters: dict[str, int] = {}
         self._procs: dict[str, object] = {}
         self._last_seen: dict[str, float] = {}
+        self._owners: dict[str, str] = {}
 
-    def register(self, master: int, proc: object = None) -> str:
+    def register(self, master: int, proc: object = None, owner: str = "web") -> str:
         stream_id = uuid.uuid4().hex
         with self._lock:
             self._masters[stream_id] = master
             self._last_seen[stream_id] = time.monotonic()
+            self._owners[stream_id] = owner
             if proc is not None:
                 self._procs[stream_id] = proc
         return stream_id
+
+    def owner(self, stream_id: str) -> str | None:
+        """Who opened a live stream ("web" or "agent"), or None."""
+        with self._lock:
+            return self._owners.get(stream_id) if stream_id in self._masters else None
 
     def unregister(self, stream_id: str, master: int) -> None:
         with self._lock:
@@ -1145,6 +1153,7 @@ class _TerminalStreamRegistry:
                 self._masters.pop(stream_id, None)
                 self._procs.pop(stream_id, None)
                 self._last_seen.pop(stream_id, None)
+                self._owners.pop(stream_id, None)
 
     def touch(self, stream_id: str) -> tuple[bool, str]:
         """Renew a browser-owned stream lease."""
@@ -1185,6 +1194,7 @@ class _TerminalStreamRegistry:
             proc = self._procs.pop(stream_id, None)
             self._masters.pop(stream_id, None)
             self._last_seen.pop(stream_id, None)
+            self._owners.pop(stream_id, None)
         if proc is None:
             return True, ""  # already gone; nothing to do
         try:
@@ -1298,7 +1308,12 @@ def make_handler(
 
         # --- AR helpers ---
 
+        # Set per request by _is_authorized: True when the scoped agent token
+        # (not the web token) opened it, so routes can serve bots differently.
+        via_agent_token = False
+
         def _is_authorized(self) -> bool:
+            self.via_agent_token = False
             if not required_token:
                 return True
             raw = self.headers.get("Authorization", "").strip()
@@ -1314,9 +1329,12 @@ def make_handler(
                 return False
             if hmac.compare_digest(presented, required_token):
                 return True
-            # Bots hold a narrower credential: it opens the MCP endpoint
-            # (and its manifest) and nothing else.
-            return routes_agent.agent_token_allows(presented, urlparse(self.path).path)
+            # Bots hold a narrower credential: it opens the agent gateway (MCP,
+            # its manifest, isolated terminal attach) and nothing else.
+            if routes_agent.agent_token_allows(presented, urlparse(self.path).path):
+                self.via_agent_token = True
+                return True
+            return False
 
         def _require_auth(self) -> bool:
             if self._is_authorized():
@@ -3479,6 +3497,9 @@ def serve(
     _reaped = reap_orphaned_attaches()
     if _reaped:
         print(f"  Reaped {_reaped} orphaned web-terminal attach(es)", flush=True)
+    _observers = reap_stale_observers()
+    if _observers:
+        print(f"  Reaped {_observers} stale agent-attach observer session(s)", flush=True)
     sk = default_skills if default_skills.is_file() else bundled_skills_path().resolve()
     activity_watcher = AgentActivityWatcher(web_project_registry)
     activity_watcher.start()

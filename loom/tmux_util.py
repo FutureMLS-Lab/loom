@@ -271,13 +271,25 @@ def _ensure_tmux_sync_output(env: dict[str, str]) -> None:
         return
 
 
-def open_pane_attach(target: str, cols: int = 80, rows: int = 24):
+OBSERVER_PREFIX = "loom-observer-"
+
+
+def open_pane_attach(target: str, cols: int = 80, rows: int = 24, *, isolated: bool = False):
     """Open a PTY running ``tmux attach-session`` to *target*, sized cols x rows.
 
     Returns ``(proc, master_fd)`` on success or ``(None, None)`` on failure. The
     caller reads ``master_fd`` (the live terminal byte stream for xterm.js),
     writes browser terminal input back to that same fd, then must
     ``proc.terminate()`` and ``os.close(master_fd)`` when done.
+
+    A plain attach is a full tmux client: attaching to ``session:window.pane``
+    makes that window the session's current one for *every* client, and under
+    ``window-size latest`` the newest client resizes the window. Right for the
+    owner's own browser; wrong for an agent or bot. ``isolated=True`` attaches
+    without touching anyone else's view: through a throwaway session grouped
+    with the target (shared windows, its own current window), as a client with
+    ``ignore-size`` (never resizes a window) and ``active-pane`` (its own active
+    pane). The grouped session destroys itself when the client detaches.
     """
     import pty
     import struct
@@ -314,21 +326,49 @@ def open_pane_attach(target: str, cols: int = 80, rows: int = 24):
             return None, None
     except (OSError, subprocess.TimeoutExpired):
         return None, None
-    # Follow the most recently active client. "smallest" looked stable until
-    # phones arrived: one loom-app viewer pinned every desktop to 49x22 for as
-    # long as it stayed connected. With "latest" the client you are actually
-    # typing in wins the size, an idle phone merely pans, and the window
-    # springs back the moment the desktop acts.
-    try:
-        subprocess.run(
-            ["tmux", "set-option", "-t", t.split(":")[0], "window-size", "latest"],
-            capture_output=True, text=True, env=env, timeout=5,
-        )
-    except (OSError, subprocess.TimeoutExpired):
-        pass
+    observer = ""
+    if isolated:
+        session, _, rest = t.partition(":")
+        observer = f"{OBSERVER_PREFIX}{uuid.uuid4().hex[:8]}"
+        try:
+            made = subprocess.run(
+                ["tmux", "new-session", "-d", "-s", observer, "-t", session],
+                capture_output=True, text=True, env=env, timeout=5,
+            )
+            if made.returncode != 0:
+                return None, None
+            subprocess.run(
+                ["tmux", "select-window", "-t", f"{observer}:{rest.split('.', 1)[0]}"],
+                capture_output=True, text=True, env=env, timeout=5,
+            )
+        except (OSError, subprocess.TimeoutExpired):
+            _kill_session(observer, env)
+            return None, None
+        # destroy-unattached must be set only once the client is attached (on
+        # a detached session tmux applies it at once), so it rides the attach
+        # command itself.
+        command = [
+            "tmux", "attach-session", "-f", "ignore-size,active-pane", "-t", observer,
+            ";", "set-option", "-t", observer, "destroy-unattached", "on",
+        ]
+    else:
+        # Follow the most recently active client. "smallest" looked stable until
+        # phones arrived: one loom-app viewer pinned every desktop to 49x22 for as
+        # long as it stayed connected. With "latest" the client you are actually
+        # typing in wins the size, an idle phone merely pans, and the window
+        # springs back the moment the desktop acts.
+        try:
+            subprocess.run(
+                ["tmux", "set-option", "-t", t.split(":")[0], "window-size", "latest"],
+                capture_output=True, text=True, env=env, timeout=5,
+            )
+        except (OSError, subprocess.TimeoutExpired):
+            pass
+        command = ["tmux", "attach-session", "-t", t]
     try:
         master, slave = pty.openpty()
     except OSError:
+        _kill_session(observer, env)
         return None, None
     try:
         fcntl.ioctl(master, termios.TIOCSWINSZ, struct.pack("HHHH", rows, cols, 0, 0))
@@ -336,7 +376,7 @@ def open_pane_attach(target: str, cols: int = 80, rows: int = 24):
         pass
     try:
         proc = subprocess.Popen(
-            ["tmux", "attach-session", "-t", t],
+            command,
             stdin=slave,
             stdout=slave,
             stderr=slave,
@@ -346,9 +386,46 @@ def open_pane_attach(target: str, cols: int = 80, rows: int = 24):
     except OSError:
         os.close(master)
         os.close(slave)
+        _kill_session(observer, env)
         return None, None
     os.close(slave)
     return proc, master
+
+
+def _kill_session(name: str, env: dict) -> None:
+    if not name:
+        return
+    try:
+        subprocess.run(
+            ["tmux", "kill-session", "-t", name],
+            capture_output=True, text=True, env=env, timeout=5,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        pass
+
+
+def reap_stale_observers() -> int:
+    """Kill isolated-attach sessions that lost their client before tmux could
+    arm ``destroy-unattached`` (a failed attach, a hard kill mid-setup)."""
+    import shutil
+
+    if not shutil.which("tmux"):
+        return 0
+    env = tmux_subprocess_env()
+    try:
+        listed = subprocess.run(
+            ["tmux", "list-sessions", "-F", "#{session_name} #{session_attached}"],
+            capture_output=True, text=True, env=env, timeout=5,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return 0
+    reaped = 0
+    for line in listed.stdout.splitlines():
+        name, _, attached = line.partition(" ")
+        if name.startswith(OBSERVER_PREFIX) and attached.strip() == "0":
+            _kill_session(name, env)
+            reaped += 1
+    return reaped
 
 
 def scroll_pane(target: str, direction: str = "up", lines: int = 3) -> tuple[bool, str]:

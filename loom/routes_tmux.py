@@ -81,14 +81,19 @@ def handle_get(self, path, parsed) -> bool:  # noqa: C901
             st, b, h = _json_bytes({"ok": False, "error": "invalid target"}, 400)
             self._send(st, b, h)
             return True
-        proc, master = open_pane_attach(target, cols, rows)
+        # A bot (agent token) attaches isolated: it can watch and type, but it
+        # never switches a window or resizes one under the owner's clients.
+        isolated = bool(getattr(self, "via_agent_token", False))
+        proc, master = open_pane_attach(target, cols, rows, isolated=isolated)
         if proc is None or master is None:
             st, b, h = _json_bytes(
                 {"ok": False, "error": "could not attach to pane"}, 502
             )
             self._send(st, b, h)
             return True
-        stream_id = self.terminal_streams.register(master, proc)
+        stream_id = self.terminal_streams.register(
+            master, proc, owner="agent" if isolated else "web"
+        )
         self.close_connection = True
         # A dropped SSH tunnel or a lid-closed laptop never sends FIN:
         # without keepalive the half-open socket keeps this attach (a
@@ -163,7 +168,20 @@ def handle_get(self, path, parsed) -> bool:  # noqa: C901
 
     return False
 
+def _foreign_stream(self, stream_id: str) -> bool:
+    """A bot (agent token) may only drive streams it opened itself."""
+    if not getattr(self, "via_agent_token", False):
+        return False
+    owner = self.terminal_streams.owner(stream_id)
+    return owner is not None and owner != "agent"
+
+
 def handle_post(self, path, parsed, body) -> bool:  # noqa: C901
+    if path in ("/api/tmux/stream-input", "/api/tmux/stream-close", "/api/tmux/stream-heartbeat"):
+        if _foreign_stream(self, str(body.get("stream_id", "")).strip()):
+            st, b, h = _json_bytes({"ok": False, "error": "that stream belongs to another client"}, 403)
+            self._send(st, b, h)
+            return True
     if path == "/api/tmux/stream-input":
         stream_id = str(body.get("stream_id", "")).strip()
         text = body.get("text", "")
