@@ -4,12 +4,44 @@
 
 <h1 align="center">Loom</h1>
 
-<p align="center"><em>You drive Claude Code / Codex / Cursor — Loom keeps the worktrees, plans, diffs, and notes tidy.</em></p>
+<p align="center"><em>Many coding agents on one repository, without collisions: every task gets its own git worktree, branch and terminal.</em></p>
 
-**Loom** is a small console for driving coding agents. Give a task a goal and
-it gets a real terminal, a `PLAN.md` the deep-interview writes, its own git
-worktree, a live diff, and a ping when the agent needs you. One server, three
-clients, and a Research Factory that turns directions into reviewed papers.
+**Loom** is a console you run on your own server for Claude Code, Codex and
+Cursor's agent CLI. Each task gets a fresh worktree on a new branch (cut from
+your HEAD commit), a tmux terminal that keeps running when you close the
+browser, and a `PLAN.md` that a short interview writes. Start a second task
+while the first is working, then a third; your own checkout is not touched.
+When a task is done, read its diff and **Merge ↩** or **Push** it, one task at
+a time. Loom never commits or pushes on its own.
+
+<p align="center">
+  <img src="docs/images/parallel-tasks.png" alt="The Loom console with three agent tasks running on one repository, each on its own loom/ branch" width="900">
+</p>
+
+```
+               agent   branch       worktree
+           ┌─▶ Claude  loom/login   .RUD/login/work/app   ─┐
+app ───────┼─▶ Codex   loom/export  .RUD/export/work/app  ─┼─▶ review the diff
+your repo  └─▶ Cursor  loom/docs    .RUD/docs/work/app    ─┘          │
+                                                                      ▼
+                                                               Merge ↩ or Push
+                                                                one at a time
+```
+
+| Isolated per task | Not isolated |
+|---|---|
+| Files: its own worktree, `.RUD/<slug>/work/<repo>` | GPUs, CPU, memory and ports |
+| Branch: `loom/<slug>`, from your HEAD commit | Global caches and installs |
+| Terminal: its own tmux session and agent | Databases and other outside services |
+| Plan: its own `PLAN.md` and results table | `.env` and other untracked files: not copied in |
+| Review: its own diff in the Changes tab | Lines two tasks both edit: a conflict at merge time |
+
+The full guide (task layout, merging and conflicts, ports and GPUs, recipes):
+**[docs/PARALLEL-TASKS.md](docs/PARALLEL-TASKS.md)**.
+
+Around the tasks: one server for three clients (browser, macOS app, phone),
+Loom's tools over MCP for agents and bots, and a Research Factory that turns
+directions into reviewed papers.
 
 > **Shortest path:** open a coding agent on the target machine and say
 > *"follow [AGENT.md](AGENT.md) and deploy Loom"* — install, auth token,
@@ -30,22 +62,46 @@ Hacking on Loom itself: clone, `pip install -e '.[dev]'`, `pytest tests`.
 ## Quickstart
 
 ```bash
-loom web --project /path/to/your/project    # → http://127.0.0.1:8765
+loom web --projects --project ~    # → http://127.0.0.1:8765
 ```
+
+Your home folder becomes the workspace: add any project under it, or create a
+**New empty folder** (Loom makes it a git repo with a first commit, so its
+tasks get worktrees). Loom's own research folder is `~/loom`.
+
+Each task runs the same loop:
 
 ```
 Create task ─▶ Start agent ─▶ Deep Interview ─▶ Run /goal ─▶ Write result ─▶ (repeat)
 ```
 
 The interview fills `PLAN.md` (goal, an empty results table, a to-do list);
-`/goal` executes it; the Changes tab shows the diff; **Push** or **Merge ↩**
-when you like what you see. Loom never commits or pushes on its own.
+`/goal` executes it. You do not have to wait: create the next task on the
+same project, and the next. The Create Task dialog shows the branch and
+commit each one starts from. Three tasks in, git sees this:
+
+```console
+$ git worktree list
+/home/you/app                       3f2a9c1 [main]
+/home/you/app/.RUD/docs/work/app    3f2a9c1 [loom/docs]
+/home/you/app/.RUD/export/work/app  3f2a9c1 [loom/export]
+/home/you/app/.RUD/login/work/app   3f2a9c1 [loom/login]
+```
+
+The Changes tab shows each task's diff; **Push** or **Merge ↩** when you like
+what you see, one task at a time. Loom never commits or pushes on its own:
+ask the agent to commit on its branch, or commit in the Terminal tab.
+
+To try it on a throwaway repository first, run
+`scripts/make-parallel-demo.sh` from a clone of this repo. It builds a small
+project and prints four tasks to paste: three merge cleanly, and one
+conflicts on purpose.
 
 ## Three clients, one server
 
 | Client | What it is |
 |---|---|
-| **Web** (built-in) | The full console at `:8765` — terminal, plans, diffs, Factory. |
+| **Web** (built-in) | The full console at `:8765` — projects and tasks in one sidebar, Chat / Terminal / Files / Changes per task, a dock of active tasks, Factory. |
 | **[loom-desktop](https://github.com/FutureMLS-Lab/loom-desktop)** | macOS dock & console: live task pills, inline chat, terminal and diffs without a browser tab. |
 | **[loom-app](https://github.com/FutureMLS-Lab/loom-app)** | Mobile & web client for checking the fleet and replying to agents from a phone. |
 
@@ -136,7 +192,8 @@ loom web --project /path --openclaw \
 
 | Flag | Purpose |
 |------|---------|
-| `--project PATH` | Project root: a git repo, or with `--projects` a directory of repos. |
+| `--project PATH` | Project root: a git repo, or with `--projects` a workspace folder such as `~`. |
+| `--projects` | Workspace mode: `--project` is a folder of projects (such as `~`), not a project itself; add the ones you want from the console. |
 | `--skills PATH` | Default skills markdown for new tasks (the default prompt is always injected regardless). |
 | `--auth-token TOKEN` | Require auth (bearer / basic, password = token). Also reads `LOOM_WEB_AUTH_TOKEN`. |
 | `--daemon` | Run in the background; logs in `<project>/.RUD/web.log`. |
@@ -144,6 +201,9 @@ loom web --project /path --openclaw \
 
 ## Going deeper
 
+- **[docs/PARALLEL-TASKS.md](docs/PARALLEL-TASKS.md)** — many tasks on one
+  repository: what a task is on disk, merging and conflicts, what is and is
+  not isolated, recipes, cleanup.
 - **[AGENT.md](AGENT.md)** — one-file deploy runbook an agent can execute.
 - **[docs/API.md](docs/API.md)** — the HTTP API contract every client speaks
   (console, desktop, mobile, OpenClaw agents, your scripts), plus where
