@@ -3166,3 +3166,4 @@ body.is-resizing { cursor: col-resize; user-select: none; }
   background: transparent; color: inherit; font: inherit; font-size: 0.8rem; font-weight: 650; cursor: pointer;
 }
 .wt-picker__merge, .wt-picker__push { white-space: nowrap; flex: 0 0 auto; }
+.task-row__more { flex: 0 0 auto; font-size: 0.64rem; color: var(--text-faint); white-space: nowrap; }

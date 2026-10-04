@@ -454,8 +454,11 @@ function wsRowMetaHtml(pid, t) {
   if (!branch && !(info && info.worktrees)) return '';
   const bits = [];
   if (branch) {
-    const more = info && info.worktrees > 1 ? ` +${info.worktrees - 1}` : '';
-    bits.push(`<span class="task-row__branch">${wsIcon('branch', 'ico ico--xs')}${escapeHtml(branch)}${more}</span>`);
+    bits.push(`<span class="task-row__branch">${wsIcon('branch', 'ico ico--xs')}${escapeHtml(branch)}</span>`);
+  }
+  if (info && info.worktrees > 1) {
+    // Spelled out: a bare "+4" next to the line counts reads as four lines.
+    bits.push(`<span class="task-row__more" title="${info.worktrees} worktrees in this task">+${info.worktrees - 1} more</span>`);
   }
   if (info && (info.insertions || info.deletions)) {
     bits.push(`<span class="task-row__stat"><span class="is-add">+${info.insertions || 0}</span>`
