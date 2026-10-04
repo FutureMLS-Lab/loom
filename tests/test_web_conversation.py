@@ -237,6 +237,41 @@ def test_plain_numbered_final_question_creates_numeric_actions(tmp_path) -> None
     assert [option["value"] for option in options] == ["1", "2"]
 
 
+def _final_assistant_kinds(tmp_path, text: str) -> list[str]:
+    transcript = tmp_path / "final.jsonl"
+    _write_jsonl(
+        transcript,
+        [{"role": "assistant", "message": {"content": [{"type": "text", "text": text}]}}],
+    )
+    return [message["kind"] for message in _parse_conversation_transcript(transcript, "claude")]
+
+
+def test_closing_list_of_points_is_not_a_choice(tmp_path) -> None:
+    # The question mark belongs to a quoted example, not to the list.
+    text = (
+        "## 现在就能用\n"
+        '- 在 Slack 里直接问 bot:"Loom 上有什么在等我?"\n'
+        "- 打开 `/agent` 网页聊天。\n\n"
+        "两点需要你知道:\n"
+        "1. **从 Slack 发起的写操作**目前需要在 Control UI 里点批准。\n"
+        "2. 那篇论文的**终审 gate 还在等你决定**。"
+    )
+
+    assert _final_assistant_kinds(tmp_path, text) == ["assistant"]
+
+
+def test_list_followed_by_its_question_is_a_choice(tmp_path) -> None:
+    text = "I can go two ways:\n\n1. Rebase onto main\n2. Merge main in\n\nWhich do you prefer?"
+
+    assert _final_assistant_kinds(tmp_path, text) == ["assistant", "question"]
+
+
+def test_list_with_more_text_after_it_is_not_a_choice(tmp_path) -> None:
+    text = "下一步做哪个？\n1. 修复测试\n2. 更新文档\n\n我先把测试修了。\n然后再看文档。"
+
+    assert _final_assistant_kinds(tmp_path, text) == ["assistant"]
+
+
 def test_terminal_checkbox_question_is_parsed_and_answered_with_keys() -> None:
     capture = """
 │ Question 1 of 1

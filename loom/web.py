@@ -1892,6 +1892,10 @@ def make_handler(
                         message["tool"] = tool
                     elif message.get("kind") == "question":
                         question = dict(message.get("question") or {})
+                        # A list read out of the agent's text is only a
+                        # question once the agent has stopped to hear back.
+                        if working and question.get("source") == "numbered":
+                            continue
                         if not active and question.get("status") == "pending":
                             question["status"] = "canceled"
                         message["question"] = question

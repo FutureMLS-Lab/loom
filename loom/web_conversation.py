@@ -164,28 +164,49 @@ def _conversation_question_tool(name: str, payload: Any) -> dict[str, Any] | Non
     }
 
 
+_NUMBERED_CHOICE_CUES = (
+    "choose",
+    "select one",
+    "pick one",
+    "which one",
+    "which option",
+    "which would",
+    "would you like",
+    "do you want",
+    "shall i",
+    "reply with",
+    "请选择",
+    "选择一个",
+    "选一个",
+    "选哪",
+    "哪一个",
+    "哪个",
+    "哪种",
+    "要不要",
+    "回复数字",
+    "你想",
+    "你希望",
+    "您希望",
+)
+
+
+def _conversation_asks(line: str) -> bool:
+    """A line that puts a question to the reader, not one announcing a list."""
+    stripped = line.strip().rstrip("*_ ")
+    if stripped.endswith(("?", "？")):
+        return True
+    lowered = stripped.lower()
+    return any(cue in lowered for cue in _NUMBERED_CHOICE_CUES)
+
+
 def _conversation_numbered_question(text: str) -> dict[str, Any] | None:
-    """Recognize a final plain-text 1/2/3 choice without parsing normal lists."""
-    lowered = text.lower()
-    if not (
-        "?" in text
-        or "？" in text
-        or any(
-            cue in lowered
-            for cue in (
-                "choose",
-                "select",
-                "pick one",
-                "which option",
-                "reply with",
-                "请选择",
-                "选择一个",
-                "回复数字",
-                "选哪",
-            )
-        )
-    ):
-        return None
+    """Recognize a final plain-text 1/2/3 choice without parsing normal lists.
+
+    The list has to close the message, with the question asked beside it: the
+    line before it or a line after it. A question mark elsewhere — a quoted
+    example, an earlier paragraph — left a closing list of points ("two things
+    to know: 1. … 2. …") offered as buttons to press.
+    """
     matches = list(
         re.finditer(
             r"(?m)^\s*(\d{1,2})[\.\)、:：]\s+(.+?)\s*$",
@@ -196,6 +217,20 @@ def _conversation_numbered_question(text: str) -> dict[str, Any] | None:
         return None
     numbers = [int(match.group(1)) for match in matches]
     if numbers != list(range(1, len(matches) + 1)):
+        return None
+    prompt = text[: matches[0].start()].strip()
+    prompt_lines = [line.strip() for line in prompt.splitlines() if line.strip()]
+    # Indented lines after the last item still belong to it.
+    trailing = [
+        line
+        for line in text[matches[-1].end() :].splitlines()
+        if line.strip() and not line[:1].isspace()
+    ]
+    if len(trailing) > 1:
+        return None
+    asked_before = bool(prompt_lines) and _conversation_asks(prompt_lines[-1])
+    asked_after = bool(trailing) and _conversation_asks(trailing[0])
+    if not (asked_before or asked_after):
         return None
     options = []
     for match in matches:
@@ -208,8 +243,8 @@ def _conversation_numbered_question(text: str) -> dict[str, Any] | None:
                 "value": match.group(1),
             }
         )
-    prompt = text[: matches[0].start()].strip()
-    prompt_lines = [line.strip() for line in prompt.splitlines() if line.strip()]
+    if asked_after and not asked_before:
+        prompt_lines = [trailing[0].strip()]
     return {
         "title": "Choose an option",
         "source": "numbered",
