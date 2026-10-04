@@ -235,6 +235,15 @@ def web_cmd(
             "Omit this if the launch directory itself is a normal single project root."
         ),
     ),
+    public_url: str | None = typer.Option(
+        None,
+        "--public-url",
+        envvar="LOOM_PUBLIC_URL",
+        help=(
+            "The https:// address clients outside this machine use (tunnel or proxy). "
+            "It is the OAuth issuer ChatGPT checks; without it, the request's own host is used."
+        ),
+    ),
 ) -> None:
     """Start local web UI for `.RUD` tasks (interview, PLAN.md, NOTES.md)."""
     from loom.doctor import required_failures
@@ -313,6 +322,8 @@ def web_cmd(
             cmd.append("--openclaw-debug")
         if projects:
             cmd.append("--projects")
+        if public_url:
+            cmd.extend(["--public-url", public_url])
         for h in openclaw_header or []:
             cmd.extend(["--openclaw-header", h])
         with open(log_path, "ab", buffering=0) as out:
@@ -342,6 +353,7 @@ def web_cmd(
         openclaw_config=openclaw_cfg,
         auth_token=web_auth_token,
         multi_project_workspace=projects,
+        public_url=(public_url or "").strip(),
     )
 
 
@@ -430,5 +442,66 @@ openclaw mcp doctor loom --probe
 
 ## Local stdio clients on this host (Claude Desktop, ...) - full web token
 {json.dumps(stdio, indent=2)}
+
+## ChatGPT (and other clients that only speak OAuth) - no token to paste
+# ChatGPT reaches Loom from the internet, so Loom needs a public https address
+# (Cloudflare Tunnel, Tailscale Funnel, a proxy); start the server with
+#   loom web ... --public-url https://loom.example.com
+# Then in ChatGPT: Settings -> Apps & Connectors -> Advanced -> Developer mode,
+# create a connector with URL https://loom.example.com/mcp and OAuth. ChatGPT
+# registers itself and opens Loom's approval page: sign in there with this
+# server's --auth-token. ChatGPT gets its own token for /mcp only; list or cut
+# it off with `loom oauth list` / `loom oauth revoke`, or Connected apps.
 """
     )
+
+
+# --- OAuth grants -----------------------------------------------------------------
+# What ChatGPT and other OAuth clients were allowed in, and a way to cut them
+# off. The state is the server's own file, which a running server re-reads.
+
+oauth_app = typer.Typer(help="Apps connected over OAuth (ChatGPT, ...): list and revoke.")
+app.add_typer(oauth_app, name="oauth")
+
+
+@oauth_app.command("list")
+def oauth_list_cmd() -> None:
+    """List connected apps: one row per approval."""
+    import time as _time
+
+    from loom.oauth import OAuthStore, oauth_state_path
+
+    rows = OAuthStore().grants()
+    if not rows:
+        typer.echo(f"No connected apps.  ({oauth_state_path()})")
+        return
+
+    def when(ts: float) -> str:
+        return _time.strftime("%Y-%m-%d %H:%M", _time.localtime(ts)) if ts else "-"
+
+    for row in rows:
+        typer.echo(
+            f"{row['id']}  {row['client_name']}  ->{row['redirect_host'] or '?'}"
+            f"  approved {when(row['approved_at'])}  last used {when(row['last_used_at'])}"
+        )
+
+
+@oauth_app.command("revoke")
+def oauth_revoke_cmd(
+    grant: str = typer.Argument(None, help="Grant id from `loom oauth list`"),
+    all_: bool = typer.Option(False, "--all", help="Revoke every grant and forget every registered app"),
+) -> None:
+    """Cut an app off. It must be approved again to reconnect."""
+    from loom.oauth import OAuthStore
+
+    store = OAuthStore()
+    if all_:
+        typer.echo(f"Revoked {store.revoke_all()} grant(s); every app must connect again.")
+        return
+    if not grant:
+        typer.echo("Name a grant id (see `loom oauth list`) or pass --all.")
+        raise typer.Exit(1)
+    if not store.revoke_grant(grant):
+        typer.echo(f"No grant {grant}.")
+        raise typer.Exit(1)
+    typer.echo(f"Revoked {grant}.")

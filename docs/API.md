@@ -209,6 +209,38 @@ Both accept the scoped **agent token** (`~/.loom/agent/agent-token`) as well
 as the web token; nothing else accepts the agent token. Browser-originated
 POSTs to `/mcp` must be same-origin.
 
+### OAuth for `/mcp` (ChatGPT and other OAuth-only clients)
+
+On when the server runs with `--auth-token`. A client discovers, registers,
+sends the owner to Loom's approval page, and trades the code for its own
+tokens; the owner approves with the server's `--auth-token`, which is checked
+on that page and never reaches the client. Access tokens open what the agent
+token opens (`/mcp` and the manifest) and nothing else.
+
+| Method | URL | Purpose |
+|--------|-----|---------|
+| `GET` | `/.well-known/oauth-protected-resource` (also `…/mcp`) | RFC 9728: `{resource: <base>/mcp, authorization_servers: [<base>], scopes_supported: ["mcp"]}` |
+| `GET` | `/.well-known/oauth-authorization-server` | RFC 8414: endpoints, `code_challenge_methods_supported: ["S256"]`, `token_endpoint_auth_methods_supported: ["none"]`, `authorization_response_iss_parameter_supported: true` |
+| `POST` | `/oauth/register` `{redirect_uris, client_name?}` | RFC 7591 dynamic registration of a public client → `201 {client_id, …}`. Redirect URIs must be `https://`, or `http://` to localhost |
+| `GET` | `/oauth/authorize?response_type=code&client_id&redirect_uri&code_challenge&code_challenge_method=S256&state[&resource]` | The approval page. An unknown client or unregistered redirect gets an error page and no redirect; other errors go back to the client |
+| `POST` | `/oauth/authorize` (form: `request_id, owner_token, decision`) | Allow → `302 <redirect_uri>?code&state&iss`; deny → `error=access_denied`. Five wrong tokens from one address (twenty overall) in 15 min pause approvals |
+| `POST` | `/oauth/token` (form) | `authorization_code` (with `code_verifier`, single-use code, 2 min) or `refresh_token` (rotated; a replayed one revokes the grant) → `{access_token, token_type: "Bearer", expires_in: 3600, refresh_token, scope: "mcp"}` |
+| `POST` | `/oauth/revoke` (form: `token`) | RFC 7009; ends the whole grant; always `200` |
+| `GET` | `/api/oauth/grants` | Owner only: `{enabled, mcp_url, public_url, grants: [{id, client_name, redirect_host, approved_at, last_used_at}]}` |
+| `DELETE` | `/api/oauth/grants/<id>` (`all` for every grant) | Owner only: cut an app off |
+
+- The issuer is `--public-url` (`LOOM_PUBLIC_URL`) when set, else the
+  request's `X-Forwarded-Proto` / `Host`. ChatGPT compares it exactly, so set
+  it whenever Loom sits behind a tunnel or proxy.
+- `resource` may be `<base>/mcp` or `<base>`; tokens are bound to
+  `<base>/mcp`, and a token for another resource is refused.
+- A `401` from `/mcp` carries `WWW-Authenticate: Bearer
+  resource_metadata="<base>/.well-known/oauth-protected-resource/mcp",
+  scope="mcp"` (plus `error="invalid_token"` when a bearer token was sent).
+- State: `~/.loom/oauth/state.json` (0600; tokens stored as SHA-256 hashes).
+  `loom oauth list` / `loom oauth revoke <id>|--all` edit it, and a running
+  server picks the change up on its next request.
+
 ## Paper Factory (AR)
 
 AR state lives in the task: `GET /api/tasks/<slug>/ar` returns the full

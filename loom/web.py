@@ -49,6 +49,7 @@ from loom.web_jobs import (
     _sweep_stale_review_runs,
 )
 from loom import routes_agent
+from loom import routes_oauth
 from loom import routes_ar
 from loom import routes_rebuttal
 from loom import routes_review
@@ -80,6 +81,7 @@ from loom.web_conversation import (
     _session_last_active,
 )
 from loom import ar_task as ar
+from loom.oauth import OAuthStore
 from loom import rebuttal_task as rebuttal
 from loom.openclaw import OpenClawClient, OpenClawConfig, openclaw_status
 from loom.paths import (
@@ -1277,6 +1279,8 @@ def make_handler(
     monitor_manager: "TaskMonitorManager | None" = None,
     ar_manager: "ARLoopManager | None" = None,
     activity_watcher: "AgentActivityWatcher | None" = None,
+    public_url: str = "",
+    oauth_store: OAuthStore | None = None,
 ) -> type[BaseHTTPRequestHandler]:
     static_root = web_static_dir().resolve()
     required_token = auth_token.strip()
@@ -1366,17 +1370,27 @@ def make_handler(
             if hmac.compare_digest(presented, required_token):
                 return True
             # Bots hold a narrower credential: it opens the MCP endpoint
-            # (and its manifest) and nothing else.
-            return routes_agent.agent_token_allows(presented, urlparse(self.path).path)
+            # (and its manifest) and nothing else. So do the OAuth tokens
+            # ChatGPT and other OAuth-only clients are issued.
+            path = urlparse(self.path).path
+            return routes_agent.agent_token_allows(presented, path) or routes_oauth.bearer_allows(
+                self, presented, path
+            )
 
         def _require_auth(self) -> bool:
             if self._is_authorized():
                 return True
             body = b"authentication required\n"
+            challenge = 'Basic realm="Loom"'
+            if urlparse(self.path).path in routes_agent.AGENT_ROUTES and routes_oauth.enabled(self):
+                # An MCP client is told where to start OAuth, not to type a
+                # password into a browser prompt.
+                presented = self.headers.get("Authorization", "").strip().lower().startswith("bearer ")
+                challenge = routes_oauth.challenge(self, presented)
             self.send_response(401)
             self.send_header("Content-Type", "text/plain; charset=utf-8")
             self.send_header("Content-Length", str(len(body)))
-            self.send_header("WWW-Authenticate", 'Basic realm="Loom"')
+            self.send_header("WWW-Authenticate", challenge)
             self.send_header("Cache-Control", "no-store")
             self.send_header("Connection", "close")
             self.end_headers()
@@ -1470,10 +1484,14 @@ def make_handler(
             }
 
         def do_GET(self) -> None:  # noqa: N802
-            if not self._require_auth():
-                return
             parsed = urlparse(self.path)
             path = parsed.path
+            # OAuth discovery and the approval page are public by design:
+            # they are how a client without a Loom token gets one of its own.
+            if routes_oauth.handle_public_get(self, path, parsed):
+                return
+            if not self._require_auth():
+                return
 
             # Dedicated entry documents share the same authenticated API and
             # static assets while presenting one focused workflow.
@@ -1599,6 +1617,8 @@ def make_handler(
                 return
 
             if routes_agent.handle_get(self, path, parsed):
+                return
+            if routes_oauth.handle_get(self, path, parsed):
                 return
             if routes_tmux.handle_get(self, path, parsed):
                 return
@@ -2160,6 +2180,8 @@ def make_handler(
             # web token - checked before _require_auth, which would reject it.
             if parsed.path == "/api/activity/finished":
                 self._agent_finished(_read_json(self))
+                return
+            if routes_oauth.handle_public_post(self, parsed.path, parsed):
                 return
             if not self._require_auth():
                 return
@@ -3452,6 +3474,8 @@ def make_handler(
 
             if routes_agent.handle_delete(self, path, parsed):
                 return
+            if routes_oauth.handle_delete(self, path, parsed):
+                return
             if routes_rebuttal.handle_delete(self, path, parsed):
                 return
             if routes_review.handle_delete(self, path, parsed):
@@ -3583,6 +3607,10 @@ def make_handler(
     Handler.ar_manager = ar_manager
     Handler.claude_registry = claude_registry
     Handler.auth_token = required_token
+    Handler.public_url = public_url.strip().rstrip("/")
+    # One store per server: it holds the in-flight approvals and codes, and
+    # reloads the on-disk grants when `loom oauth revoke` changes them.
+    Handler.oauth_store = (oauth_store or OAuthStore()) if required_token else None
     return Handler
 
 
@@ -3598,6 +3626,7 @@ def serve(
     auth_token: str = "",
     *,
     multi_project_workspace: bool = False,
+    public_url: str = "",
 ) -> None:
     project_root = project_root.resolve()
     os.environ["LOOM_PROJECT_ROOT"] = str(project_root)
@@ -3681,6 +3710,7 @@ def serve(
         monitor_manager=monitor_manager,
         ar_manager=ar_manager,
         activity_watcher=activity_watcher,
+        public_url=public_url,
     )
     server = ThreadingHTTPServer((host, port), handler)
     rud_root = project_root / ".RUD"
@@ -3712,6 +3742,15 @@ def serve(
         f" bot token {routes_agent.agent_token_path()}  (`loom agent-config`)",
         flush=True,
     )
+    if auth_token.strip():
+        where = public_url.strip().rstrip("/") or "the URL the client uses (set --public-url behind a tunnel)"
+        print(
+            f"  OAuth:            for ChatGPT and other OAuth-only MCP clients; issuer {where};"
+            " approve with this server's --auth-token  (`loom oauth list`)",
+            flush=True,
+        )
+    else:
+        print("  OAuth:            off (needs --auth-token)", flush=True)
     print(f"  OpenClaw:         {openclaw_status(openclaw_client.config)}", flush=True)
     print("", flush=True)
     openclaw_client.emit(

@@ -112,7 +112,8 @@ own domain).
 Agents and bots get their own door: Loom's tools over **MCP** (`POST /mcp`,
 or `loom mcp` over stdio) for Claude Code / Codex / Cursor / OpenClaw — tasks,
 agent conversations, tmux sessions and keys, and the factories, with a scoped
-token for bots. `loom agent-config` prints the setup for each client; see
+token for bots. **ChatGPT** connects over OAuth: you approve it on Loom's own
+page and it gets a revocable token for `/mcp` only, never yours. `loom agent-config` prints the setup for each client; see
 [docs/AGENT-GATEWAY.md](docs/AGENT-GATEWAY.md).
 
 ## Research Factory

@@ -1298,6 +1298,8 @@ function wsHandleEscape() {
   if (quick && !quick.hidden) { closeQuickOpen(); return true; }
   const pop = document.getElementById('agent-popover');
   if (pop && !pop.hidden) { wsToggleAgentPopover(false); return true; }
+  const apps = document.getElementById('apps-modal');
+  if (apps && !apps.hidden) { closeAppsModal(); return true; }
   return false;
 }
 
@@ -1568,3 +1570,112 @@ function wsInitCreatePreview() {
     }).observe(modal, { attributes: true, attributeFilter: ['hidden'] });
   }
 }
+
+// ===== Connected apps (OAuth grants) =====
+//
+// ChatGPT and other clients that only speak OAuth are approved on Loom's own
+// page and get tokens that open /mcp alone. This is where the owner sees who
+// is connected and cuts them off; the server side is routes_oauth.py.
+
+function wsAppsWhen(ts) {
+  if (!ts) return '—';
+  return new Date(ts * 1000).toLocaleString(undefined, { dateStyle: 'medium', timeStyle: 'short' });
+}
+
+async function openAppsModal() {
+  const modal = document.getElementById('apps-modal');
+  if (!modal) return;
+  closeMenu();
+  modal.hidden = false;
+  await renderAppsModal();
+}
+
+function closeAppsModal() {
+  const modal = document.getElementById('apps-modal');
+  if (modal) modal.hidden = true;
+}
+
+async function renderAppsModal() {
+  const body = document.getElementById('apps-body');
+  const status = document.getElementById('apps-status');
+  const revokeAll = document.getElementById('btn-apps-revoke-all');
+  if (!body) return;
+  body.innerHTML = '<p class="tab-panel__hint">Loading…</p>';
+  let d;
+  try {
+    d = await apiNoProject('/api/oauth/grants');
+  } catch (e) {
+    body.innerHTML = `<p class="apps-warn">${escapeHtml(e.message)}</p>`;
+    return;
+  }
+  if (status) status.textContent = '';
+  if (!d.enabled) {
+    body.innerHTML = '<p class="apps-warn">OAuth is off: this Loom runs without <code>--auth-token</code>, '
+      + 'so there is nothing to approve apps with. Start it with one to connect ChatGPT.</p>';
+    if (revokeAll) revokeAll.hidden = true;
+    return;
+  }
+  const url = d.mcp_url || '';
+  const local = /^http:\/\/(127\.|localhost|\[::1\])/.test(url) || url.startsWith('http://');
+  let html = '<section class="apps-connect"><h3>Connect ChatGPT</h3>'
+    + `<div class="apps-url"><code id="apps-mcp-url">${escapeHtml(url)}</code>`
+    + '<button type="button" class="btn btn--sm" id="btn-apps-copy">Copy</button></div>';
+  if (local) {
+    html += '<p class="apps-warn">ChatGPT connects from the internet and needs <b>https</b>. Put Loom behind a tunnel '
+      + 'or proxy (Cloudflare Tunnel, Tailscale Funnel, Caddy) and start it with '
+      + '<code>--public-url https://your-host</code>; this address then follows.</p>';
+  }
+  html += '<ol class="apps-steps"><li>In ChatGPT: Settings → Apps &amp; Connectors → Advanced → Developer mode.</li>'
+    + '<li>Create a connector with the URL above and <b>OAuth</b> authentication.</li>'
+    + '<li>ChatGPT opens Loom’s approval page: enter this Loom’s access token there and Allow.</li></ol></section>';
+  const grants = Array.isArray(d.grants) ? d.grants : [];
+  html += '<section class="apps-list"><h3>Connected</h3>';
+  if (!grants.length) {
+    html += '<p class="tab-panel__hint">No app is connected.</p>';
+  } else {
+    html += '<ul>' + grants.map((g) => `<li class="apps-row" data-grant="${escapeHtml(g.id)}">`
+      + `<span class="apps-row__name">${escapeHtml(g.client_name)}</span>`
+      + `<span class="apps-row__meta">returns to ${escapeHtml(g.redirect_host || '?')} · approved ${escapeHtml(wsAppsWhen(g.approved_at))}`
+      + ` · last used ${escapeHtml(wsAppsWhen(g.last_used_at))}</span>`
+      + '<button type="button" class="btn btn--sm btn--danger apps-row__revoke">Revoke</button></li>').join('')
+      + '</ul>';
+  }
+  html += '</section>';
+  body.innerHTML = html;
+  if (revokeAll) revokeAll.hidden = !grants.length;
+  const copy = document.getElementById('btn-apps-copy');
+  if (copy) copy.addEventListener('click', () => wsCopy(url));
+}
+
+async function revokeApp(id) {
+  const all = id === 'all';
+  const ok = confirm(all
+    ? 'Revoke every connected app? Each one must be approved again to reconnect.'
+    : 'Revoke this app? It loses access at once and must be approved again to reconnect.');
+  if (!ok) return;
+  try {
+    await apiNoProject(`/api/oauth/grants/${encodeURIComponent(id)}`, { method: 'DELETE' });
+    toast(all ? 'Every app was disconnected.' : 'App disconnected.', { type: 'success' });
+  } catch (e) {
+    toast(e.message, { type: 'error' });
+  }
+  renderAppsModal();
+}
+
+(function initAppsModal() {
+  const modal = document.getElementById('apps-modal');
+  if (!modal) return;
+  const on = (id, fn) => {
+    const el = document.getElementById(id);
+    if (el) el.addEventListener('click', fn);
+  };
+  on('btn-go-apps', openAppsModal);
+  on('btn-apps-close', closeAppsModal);
+  on('btn-apps-done', closeAppsModal);
+  on('btn-apps-revoke-all', () => revokeApp('all'));
+  modal.addEventListener('click', (ev) => {
+    if (ev.target === modal) closeAppsModal();
+    const btn = ev.target.closest('.apps-row__revoke');
+    if (btn) revokeApp(btn.closest('.apps-row').dataset.grant);
+  });
+})();

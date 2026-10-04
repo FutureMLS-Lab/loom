@@ -50,6 +50,31 @@ openclaw mcp doctor loom --probe
 LOOM_URL=http://127.0.0.1:8765 LOOM_WEB_AUTH_TOKEN=... loom mcp
 ```
 
+### ChatGPT: OAuth, so no token is pasted anywhere
+
+ChatGPT connects to a remote MCP server only through OAuth, so Loom runs a
+small authorization server for `/mcp` (on whenever the server has an
+`--auth-token`):
+
+1. **Make Loom reachable over https.** ChatGPT connects from OpenAI's side,
+   not from your machine: put Loom behind a tunnel or proxy (Cloudflare
+   Tunnel, Tailscale Funnel, Caddy) and start it with that address,
+   `loom web ... --public-url https://loom.example.com`. The public URL is the
+   OAuth issuer, which ChatGPT compares character for character.
+2. **Add the connector.** ChatGPT → Settings → Apps & Connectors → Advanced →
+   Developer mode → create a connector with URL `https://loom.example.com/mcp`
+   and OAuth authentication.
+3. **Approve it on Loom's page.** ChatGPT registers itself and opens Loom's
+   approval page, which names the app and where it sends you back. Enter this
+   Loom's `--auth-token` there and Allow.
+
+ChatGPT ends up with an access token (one hour) and a refresh token
+(30 days, rotated on use) of its own. They open `/mcp` and nothing else, and
+your Loom token stays on the server. **Connected apps** in the console's
+sidebar, or `loom oauth list` / `loom oauth revoke <id>`, cuts an app off at
+once. The same flow works for any client that speaks MCP OAuth with PKCE and
+dynamic registration. Endpoints: [API.md](API.md#oauth-for-mcp-chatgpt-and-other-oauth-only-clients).
+
 `GET /api/agent/manifest` describes the endpoint and tools machine-readably,
 with URLs rewritten to the `Host` the caller used.
 
@@ -108,6 +133,12 @@ you are looking at or resize one.
   over loopback with the server's own token.
 - **No token, no tools.** Browser POSTs to `/mcp` must also be same-origin,
   so another site cannot drive it with a browser's cached Basic credentials.
+- **OAuth clients never see a Loom token.** The owner approves on Loom's own
+  page with the `--auth-token`; the client gets short-lived tokens bound to
+  this server's `/mcp` (stored hashed, revocable, PKCE S256 only, codes
+  single-use, a replayed refresh token revokes the grant). The approval page
+  cannot be framed and posts only to Loom and the redirect the app
+  registered; repeated wrong tokens pause approvals.
 - **Annotated tools.** Every tool carries MCP `readOnlyHint` /
   `destructiveHint`; `send_keys` and `stop_agent` are marked destructive (a
   key can approve a prompt or kill a process). Codex app-server — and so

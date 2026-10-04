@@ -43,6 +43,7 @@
     <symbol id="i-codex" viewBox="0 0 24 24"><path d="m8.5 7.5-4.5 4.5 4.5 4.5M15.5 7.5l4.5 4.5-4.5 4.5M13.6 5.2l-3.2 13.6"/></symbol>
     <symbol id="i-cursor" viewBox="0 0 24 24"><path d="M5.5 3.8 18.6 11l-6.1 1.6-2.7 6.4z"/></symbol>
     <symbol id="i-paper" viewBox="0 0 24 24"><path d="M7 3.5h6.8L18.5 8v10.5a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2v-13a2 2 0 0 1 2-2z"/><path d="M8.5 12h7M8.5 15.5h7M8.5 8.5h3"/></symbol>
+    <symbol id="i-plug" viewBox="0 0 24 24"><path d="M9 3.5v4M15 3.5v4"/><path d="M6.5 7.5h11v3.5a5.5 5.5 0 0 1-11 0z"/><path d="M12 16.5v4"/></symbol>
     <symbol id="i-factory" viewBox="0 0 24 24"><path d="M3.5 20.5V10l5 3V10l5 3V10l5 3V4.5h2v16z"/><path d="M7 17h2M11.5 17h2M16 17h2"/></symbol>
   </svg>
   <header class="titlebar">
@@ -111,6 +112,7 @@
         <button type="button" class="sidebar-action" id="btn-go-overview"><svg class="ico" aria-hidden="true"><use href="#i-grid"/></svg><span>Workspace</span><kbd>Alt H</kbd></button>
         <button type="button" class="sidebar-action" id="btn-go-quick"><svg class="ico" aria-hidden="true"><use href="#i-search"/></svg><span>Quick switch</span><kbd>⌘K</kbd></button>
         <button type="button" class="sidebar-action" id="btn-go-new"><svg class="ico" aria-hidden="true"><use href="#i-plus"/></svg><span>New task</span><kbd>Alt N</kbd></button>
+        <button type="button" class="sidebar-action" id="btn-go-apps"><svg class="ico" aria-hidden="true"><use href="#i-plug"/></svg><span>Connected apps</span></button>
         <button type="button" class="sidebar-action" id="btn-go-notes"><svg class="ico" aria-hidden="true"><use href="#i-note"/></svg><span>Project notes</span></button>
         <a class="sidebar-action" href="/factory" id="btn-go-factory"><svg class="ico" aria-hidden="true"><use href="#i-factory"/></svg><span>Research Factory</span><svg class="ico ico--xs sidebar-action__ext" aria-hidden="true"><use href="#i-arrow-up-right"/></svg></a>
       </div>
@@ -487,6 +489,24 @@
   </div>
 
   <div class="menu" id="menu" role="menu" hidden></div>
+
+  <div class="modal-backdrop" id="apps-modal" hidden>
+    <div class="modal-card apps-modal" role="dialog" aria-modal="true" aria-labelledby="apps-modal-title">
+      <div class="modal-card__header">
+        <div>
+          <h2 id="apps-modal-title">Connected apps</h2>
+          <p>Apps that reach Loom's tools over OAuth, such as ChatGPT. Each gets a token of its own that opens only <code>/mcp</code>; your Loom token never leaves this server.</p>
+        </div>
+        <button type="button" class="icon-btn" id="btn-apps-close" aria-label="Close">×</button>
+      </div>
+      <div class="modal-card__body" id="apps-body"></div>
+      <div class="modal-card__footer">
+        <span id="apps-status" class="tab-panel__hint"></span>
+        <button type="button" class="btn btn--danger" id="btn-apps-revoke-all" hidden>Revoke all</button>
+        <button type="button" class="btn" id="btn-apps-done">Done</button>
+      </div>
+    </div>
+  </div>
 
   <div class="modal-backdrop" id="create-modal" hidden>
     <div class="modal-card" role="dialog" aria-modal="true" aria-labelledby="create-modal-title">
