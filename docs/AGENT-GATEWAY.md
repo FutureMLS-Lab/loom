@@ -50,11 +50,49 @@ openclaw mcp doctor loom --probe
 LOOM_URL=http://127.0.0.1:8765 LOOM_WEB_AUTH_TOKEN=... loom mcp
 ```
 
-### ChatGPT: OAuth, so no token is pasted anywhere
+### ChatGPT without a public address: OpenAI's Secure MCP Tunnel
 
-ChatGPT connects to a remote MCP server only through OAuth, so Loom runs a
-small authorization server for `/mcp` (on whenever the server has an
-`--auth-token`):
+ChatGPT calls MCP servers from OpenAI's side, so it has to reach Loom somehow.
+The simplest way needs no public address and no open port: OpenAI's
+[`tunnel-client`](https://github.com/openai/tunnel-client) runs next to Loom,
+keeps an outbound HTTPS connection to OpenAI, and hands each request to
+`/mcp`, adding Loom's agent token itself. ChatGPT never sees a Loom token and
+needs no sign-in step.
+
+1. On platform.openai.com (the same account as ChatGPT; a personal account
+   uses its personal organization): Settings → Tunnels → create a tunnel, then
+   Settings → API keys → a **Restricted** key with Tunnels **Read** + **Use**.
+2. On the Loom host, store the key and the header in 0600 files and run the
+   client (as a systemd service, so it comes back after reboots):
+
+   ```bash
+   printf '%s' 'sk-...' > ~/.config/loom/openai-tunnel-key && chmod 600 ~/.config/loom/openai-tunnel-key
+   printf 'Bearer %s' "$(cat ~/.loom/agent/agent-token)" > ~/.config/loom/tunnel/mcp-authorization
+   chmod 600 ~/.config/loom/tunnel/mcp-authorization
+   tunnel-client run \
+     --control-plane.tunnel-id tunnel_... \
+     --control-plane.api-key file:$HOME/.config/loom/openai-tunnel-key \
+     --mcp.server-url http://127.0.0.1:8765/mcp \
+     --mcp.extra-headers "Authorization: file:$HOME/.config/loom/tunnel/mcp-authorization" \
+     --mcp.discovery-extra-headers "Authorization: file:$HOME/.config/loom/tunnel/mcp-authorization" \
+     --health.listen-addr 127.0.0.1:8781
+   ```
+
+   `curl 127.0.0.1:8781/readyz` says `ready`, and `tunnel-client doctor
+   --explain` with the same flags checks the whole path.
+3. In ChatGPT: Settings → Apps & Connectors → Advanced → Developer mode →
+   create an app, **Connection: Tunnel**, pick the tunnel, authentication
+   **none**.
+
+Whoever can use that app in ChatGPT drives Loom's tools, so keep it to your
+own account. If the agent token is rotated, rewrite the header file and
+restart the client.
+
+### ChatGPT over a public https address: OAuth, so no token is pasted anywhere
+
+When Loom is reachable at a public https address instead, ChatGPT connects
+only through OAuth, so Loom runs a small authorization server for `/mcp` (on
+whenever the server has an `--auth-token`):
 
 1. **Make Loom reachable over https.** ChatGPT connects from OpenAI's side,
    not from your machine: put Loom behind a tunnel or proxy (Cloudflare

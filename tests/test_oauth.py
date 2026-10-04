@@ -388,6 +388,28 @@ def test_guessing_the_owner_token_gets_shut_out(loom: str) -> None:
     assert _approve(loom, request_id)[0] == 429
 
 
+def test_rate_limit_counts_the_client_behind_the_local_proxy(loom: str) -> None:
+    client_id = _register(loom)
+    _, challenge = _pkce()
+    _, page = _approval_page(loom, _authorize_params(client_id, challenge))
+    request_id = _request_id(page)
+
+    def approve(token: str, client: str):
+        return _http(
+            f"{loom}/oauth/authorize",
+            "POST",
+            {"request_id": request_id, "owner_token": token, "decision": "allow"},
+            headers={"X-Forwarded-For": client},
+            form=True,
+        )
+
+    for _ in range(oauth.FAILURES_PER_IP):
+        assert approve("guess", "198.51.100.7")[0] == 401
+    assert approve(OWNER, "198.51.100.7")[0] == 429
+    # The owner, elsewhere, is not locked out by someone else's guessing.
+    assert approve(OWNER, "203.0.113.9")[0] == 302
+
+
 def test_registration_checks_redirect_uris(loom: str) -> None:
     def register(uris):
         return _http(f"{loom}/oauth/register", "POST", {"client_name": "x", "redirect_uris": uris})

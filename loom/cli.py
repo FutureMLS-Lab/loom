@@ -443,7 +443,17 @@ openclaw mcp doctor loom --probe
 ## Local stdio clients on this host (Claude Desktop, ...) - full web token
 {json.dumps(stdio, indent=2)}
 
-## ChatGPT (and other clients that only speak OAuth) - no token to paste
+## ChatGPT with no public address - OpenAI's Secure MCP Tunnel
+# Run OpenAI's tunnel-client next to Loom: outbound HTTPS only, and it adds
+# the agent token to each /mcp request itself. Setup: docs/AGENT-GATEWAY.md
+#   tunnel-client run --control-plane.tunnel-id tunnel_... \\
+#     --control-plane.api-key file:$HOME/.config/loom/openai-tunnel-key \\
+#     --mcp.server-url {base}/mcp \\
+#     --mcp.extra-headers "Authorization: file:$HOME/.config/loom/tunnel/mcp-authorization"
+# (that file holds "Bearer <agent token>"). In ChatGPT: Developer mode ->
+# new app -> Connection: Tunnel -> pick the tunnel, no authentication.
+
+## ChatGPT (and other clients that only speak OAuth) over a public address
 # ChatGPT reaches Loom from the internet, so Loom needs a public https address
 # (Cloudflare Tunnel, Tailscale Funnel, a proxy); start the server with
 #   loom web ... --public-url https://loom.example.com

@@ -84,7 +84,16 @@ def bearer_allows(self, token: str, path: str) -> bool:
 
 
 def _client_ip(self) -> str:
-    return str((self.client_address or ("",))[0])
+    peer = str((self.client_address or ("",))[0])
+    # Behind the local proxy every request arrives from loopback, and the
+    # proxy names the real client in X-Forwarded-For (Caddy replaces whatever
+    # the client sent). The approval rate limit counts that address, so one
+    # guesser cannot lock the owner out from everywhere.
+    if peer in ("127.0.0.1", "::1"):
+        forwarded = (self.headers.get("X-Forwarded-For") or "").split(",")[-1].strip()
+        if forwarded:
+            return forwarded
+    return peer
 
 
 def _read_body(self) -> bytes | None:
