@@ -1,10 +1,11 @@
 /**
  * loom web client.
  *
- * One task surface: an agent tmux pane plus a read-only Markdown viewer
- * that can switch between scanned task/worktree Markdown files.
- *
- * Project-scoped NOTES.md is reached via the sidebar's Notes button.
+ * Laid out like the desktop app: a sidebar of every project and its tasks,
+ * a workspace overview, and four tabs for the task in front - Chat, Terminal
+ * (the agent's tmux pane with PLAN.md underneath), Files and Changes. This
+ * file owns the task surface; workspace.js the sidebar, overview, dock and
+ * menus; chat.js and files.js their tabs.
  *
  * The client talks to /api/projects, /api/tasks, /api/tmux/*,
  * /api/tasks/<slug>/(interview|claude)/*, and template GET/PUT for
@@ -18,20 +19,34 @@ const FILES = {
 // "interview" is the embedded read-only Markdown viewer on the agent pane.
 const MARKDOWN_PANELS = ['interview'];
 
-// Tab labels are computed per task so the agent pane name matches the
-// task's agent setting (Claude / Codex).
+// The desktop app's four tabs. The terminal's panel keeps its historical id
+// "claude": half the pane code keys on it.
 const TABS = [
-  { id: 'claude', label: 'Claude', getLabel: (meta) => agentLabel(meta?.agent) },
-  { id: 'changes', label: 'Code Diff' },
+  { id: 'chat', label: 'Chat', icon: 'chat' },
+  { id: 'claude', label: 'Terminal', icon: 'terminal' },
+  { id: 'files', label: 'Files', icon: 'folder' },
+  { id: 'changes', label: 'Changes', icon: 'branch' },
 ];
 const DEFAULT_TAB = TABS[0].id;
+const TAB_STORE_KEY = 'loom.taskTab';
 
 // An AR task keeps the normal tabs: its author agent runs in the same tmux
-// pane as any other task, and the paper lives in the worktree the Code Diff
+// pane as any other task, and the paper lives in the worktree the Changes
 // tab shows. The AR tab just leads.
-const AR_TAB = { id: 'ar', label: 'AR' };
+const AR_TAB = { id: 'ar', label: 'AR', icon: 'paper' };
 function tabsFor(meta) { return isArKind(meta && meta.kind) ? [AR_TAB, ...TABS] : TABS; }
-function defaultTabFor(meta) { return isArKind(meta && meta.kind) ? AR_TAB.id : DEFAULT_TAB; }
+
+// Whoever lives in the terminal should not have to re-pick it for every task
+// they open, so the last tab used is the one the next task lands on.
+function rememberedTab() {
+  try {
+    const id = localStorage.getItem(TAB_STORE_KEY);
+    return TABS.some((t) => t.id === id) ? id : DEFAULT_TAB;
+  } catch (_) {
+    return DEFAULT_TAB;
+  }
+}
+function defaultTabFor(meta) { return isArKind(meta && meta.kind) ? AR_TAB.id : rememberedTab(); }
 
 const AGENT_LABELS = { cursor: 'Agent', claude: 'Claude', codex: 'Codex' };
 function agentLabel(name) { return AGENT_LABELS[(name || '').toLowerCase()] || 'Agent'; }
@@ -90,6 +105,8 @@ const STATE = {
   modelDefaults: { cursor: 'gpt-5.6-sol-max', claude: 'claude-fable-5', codex: 'gpt-5.5' },
   modelOptions: { cursor: [], claude: [], codex: [] },
   tasks: [],
+  // Every project's task list, keyed by project id: the sidebar shows them all.
+  tasksByProject: {},
   currentMeta: null,
   worktreeStatuses: [],
   taskRoot: '',
@@ -134,11 +151,6 @@ const STATE = {
   // poll's loadMonitor() doesn't reset the toggle the user just clicked.
   monitorBusy: false,
 };
-
-let PROJECT_DRAG_ID = '';
-let PROJECT_JUST_DRAGGED = false;
-let TASK_DRAG_SLUG = '';
-let TASK_JUST_DRAGGED = false;
 
 function withProjectQuery(path) {
   if (!STATE.projectId) return path;
@@ -236,6 +248,7 @@ function $(sel) { return document.querySelector(sel); }
 // ===== Tabs =====
 
 function showPanel(id) {
+  const previous = STATE.activePanel;
   const hasTabs = !!document.getElementById('main-tabs');
   if (hasTabs) {
     document.querySelectorAll('.tab').forEach((t) => {
@@ -248,6 +261,15 @@ function showPanel(id) {
     p.hidden = !on;
   });
   STATE.activePanel = id;
+  if (id !== AR_TAB.id) {
+    try { localStorage.setItem(TAB_STORE_KEY, id); } catch (_) { /* private mode */ }
+  }
+  // Only the tab on screen holds a connection. An attached terminal sizes the
+  // agent's pane to this window, and the chat polls every second or two.
+  if (previous === 'claude' && id !== 'claude') disconnectTerminal();
+  if (previous === 'chat' && id !== 'chat' && typeof chatHide === 'function') chatHide();
+  if (id === 'chat' && typeof chatShow === 'function') chatShow();
+  if (id === 'files' && typeof filesShow === 'function') filesShow();
   if (id === 'claude') {
     // The Claude tab embeds a read-only viewer for any scanned *.md
     // file in the task root - defaults to PLAN.md.
@@ -283,15 +305,18 @@ function buildTabs(meta) {
   nav.hidden = false;
   nav.innerHTML = '';
   const active = defaultTabFor(meta);
-  for (const t of tabsFor(meta)) {
+  tabsFor(meta).forEach((t, index) => {
     const b = document.createElement('button');
     b.type = 'button';
     b.className = 'tab' + (t.id === active ? ' active' : '');
     b.dataset.tab = t.id;
-    b.textContent = typeof t.getLabel === 'function' ? t.getLabel(meta) : t.label;
+    b.setAttribute('role', 'tab');
+    b.title = `${t.label} (Alt+${index + 1})`;
+    b.innerHTML = `<svg class="ico ico--sm" aria-hidden="true"><use href="#i-${t.icon}"/></svg>`
+      + `<span>${escapeHtml(t.label)}</span>`;
     b.addEventListener('click', () => showPanel(t.id));
     nav.appendChild(b);
-  }
+  });
 }
 
 // ===== Agent activity (which agent just stopped) =====
@@ -309,42 +334,25 @@ async function pollActivity() {
   applyActivity();
 }
 
+// The sidebar, overview, dock and the open task's status chip all read the
+// snapshot; workspace.js owns them.
 function applyActivity() {
-  const data = STATE.activity;
-  if (!data) return;
-  const tasks = data.tasks || {};
-  const projects = data.projects || {};
-
-  document.querySelectorAll('#task-list li[data-slug]').forEach((li) => {
-    const entry = tasks[`${STATE.projectId}/${li.dataset.slug}`];
-    // Running is plain status, so it shows even on the open task; a finish is
-    // an attention ask, and the open task is already being looked at.
-    const working = !!(entry && entry.working);
-    const finished = !!(entry && entry.finished_at) && li.dataset.slug !== STATE.slug;
-    li.classList.toggle('is-finished', finished);
-    li.classList.toggle('is-working', working && !finished);
-  });
-
-  document.querySelectorAll('.project-toggle[data-project-id]').forEach((chip) => {
-    const pid = chip.dataset.projectId;
-    const agg = projects[pid] || {};
-    // Blinking on the project you are already in would duplicate the task
-    // rings; the steady running light is status, not a request, so it stays.
-    const finished = (agg.finished || 0) > 0 && pid !== STATE.projectId;
-    const working = (agg.working || 0) > 0;
-    chip.classList.toggle('is-finished', finished);
-    chip.classList.toggle('is-working', working && !finished);
-  });
+  if (typeof wsApplyActivity === 'function') wsApplyActivity();
 }
 
-function ackActivity(slug) {
-  if (!slug || !STATE.projectId) return;
-  const entry = (STATE.activity && STATE.activity.tasks) || {};
-  if (!entry[`${STATE.projectId}/${slug}`]) return;
-  delete entry[`${STATE.projectId}/${slug}`];
+// Named explicitly rather than left to the server's default project: a task
+// opened from the dock or the sidebar may live in any project.
+function ackActivity(slug, projectId = STATE.projectId) {
+  if (!slug || !projectId) return;
+  const tasks = (STATE.activity && STATE.activity.tasks) || {};
+  const key = `${projectId}/${slug}`;
+  if (!tasks[key] || !tasks[key].finished_at) return;
+  tasks[key] = { ...tasks[key], finished_at: 0 };
   applyActivity();
-  api('/api/activity/ack', { method: 'POST', body: JSON.stringify({ slug }) })
-    .catch(() => {});
+  apiNoProject(`/api/activity/ack?project=${encodeURIComponent(projectId)}`, {
+    method: 'POST',
+    body: JSON.stringify({ slug }),
+  }).catch(() => {});
 }
 
 // ===== Projects =====
@@ -354,126 +362,16 @@ async function loadProjectsList() {
   STATE.projects = d.projects || [];
   STATE.launchRoot = String(d.launchRoot || '').trim();
   STATE.launchRootChildren = Array.isArray(d.launchRootChildren) ? d.launchRootChildren : [];
-  const addBtn = document.getElementById('btn-add-project');
-  if (addBtn) addBtn.title = STATE.launchRoot ? `Add a folder inside ${STATE.launchRoot}` : 'Add a folder';
   const cur = String(d.currentProjectId || d.defaultProjectId || '').trim();
   if (cur && STATE.projects.some((p) => p.id === cur)) {
     STATE.projectId = cur;
   } else {
-    STATE.projectId = null;
+    STATE.projectId = STATE.projects.length ? STATE.projects[0].id : null;
   }
-  renderProjectToggleBar();
-}
-
-function renderProjectToggleBar() {
-  const scroll = document.getElementById('project-toggle-scroll');
-  if (!scroll) return;
-  scroll.innerHTML = '';
-  const list = STATE.projects || [];
-  if (!list.length) {
-    const em = document.createElement('span');
-    em.className = 'project-bar__empty-msg';
-    em.textContent = 'No repos yet — use + Add repo to register a project root.';
-    scroll.appendChild(em);
-    syncProjectBarFades();
-    return;
+  for (const pid of Object.keys(STATE.tasksByProject)) {
+    if (!STATE.projects.some((p) => p.id === pid)) delete STATE.tasksByProject[pid];
   }
-  list.forEach((p) => {
-    const item = document.createElement('div');
-    item.className = 'project-toggle' + (p.id === STATE.projectId ? ' is-active' : '');
-    item.dataset.projectId = p.id;
-    item.title = p.path || p.name || p.id;
-    item.draggable = true;
-    item.addEventListener('dragstart', (ev) => {
-      PROJECT_DRAG_ID = p.id;
-      PROJECT_JUST_DRAGGED = true;
-      item.classList.add('is-dragging');
-      ev.dataTransfer.effectAllowed = 'move';
-      ev.dataTransfer.setData('text/plain', p.id);
-    });
-    item.addEventListener('dragover', (ev) => {
-      if (!PROJECT_DRAG_ID || PROJECT_DRAG_ID === p.id) return;
-      ev.preventDefault();
-      ev.dataTransfer.dropEffect = 'move';
-      const rect = item.getBoundingClientRect();
-      const after = ev.clientX > rect.left + (rect.width / 2);
-      clearProjectDropMarkers(scroll);
-      item.classList.toggle('is-drop-before', !after);
-      item.classList.toggle('is-drop-after', after);
-    });
-    item.addEventListener('drop', async (ev) => {
-      if (!PROJECT_DRAG_ID || PROJECT_DRAG_ID === p.id) return;
-      ev.preventDefault();
-      const dragId = ev.dataTransfer.getData('text/plain') || PROJECT_DRAG_ID;
-      const after = item.classList.contains('is-drop-after');
-      clearProjectDropMarkers(scroll);
-      await reorderProjectsByDrag(dragId, p.id, after);
-    });
-    item.addEventListener('dragend', () => {
-      PROJECT_DRAG_ID = '';
-      item.classList.remove('is-dragging');
-      clearProjectDropMarkers(scroll);
-      setTimeout(() => { PROJECT_JUST_DRAGGED = false; }, 0);
-    });
-    const btn = document.createElement('button');
-    btn.type = 'button';
-    btn.className = 'project-toggle__main';
-    btn.setAttribute('role', 'tab');
-    btn.setAttribute('aria-selected', p.id === STATE.projectId ? 'true' : 'false');
-    const label = document.createElement('span');
-    label.className = 'project-toggle__label';
-    label.textContent = p.name || p.id;
-    btn.appendChild(label);
-    btn.addEventListener('click', () => {
-      if (PROJECT_JUST_DRAGGED) return;
-      if (p.id !== STATE.projectId) switchProject(p.id);
-    });
-    item.appendChild(btn);
-    const controls = document.createElement('span');
-    controls.className = 'project-toggle__controls';
-    const rm = document.createElement('button');
-    rm.type = 'button';
-    rm.className = 'project-toggle__rm';
-    rm.setAttribute('aria-label', `Remove ${p.name || p.id} from list`);
-    rm.textContent = '×';
-    rm.addEventListener('click', (ev) => {
-      ev.preventDefault();
-      ev.stopPropagation();
-      removeProject(p.id);
-    });
-    controls.appendChild(rm);
-    item.appendChild(controls);
-    scroll.appendChild(item);
-  });
-  requestAnimationFrame(() => {
-    const active = scroll.querySelector('.project-toggle.is-active');
-    if (active) active.scrollIntoView({ block: 'nearest', inline: 'center', behavior: 'smooth' });
-    syncProjectBarFades();
-    applyActivity();
-  });
-}
-
-// Fade whichever edge of the project bar still has chips behind it, so a
-// half-visible chip reads as "scrollable" rather than clipped.
-function syncProjectBarFades() {
-  const scroll = document.getElementById('project-toggle-scroll');
-  if (!scroll) return;
-  const max = scroll.scrollWidth - scroll.clientWidth;
-  scroll.classList.toggle('is-fade-start', scroll.scrollLeft > 4);
-  scroll.classList.toggle('is-fade-end', scroll.scrollLeft < max - 4);
-  if (scroll.dataset.fadeBound) return;
-  scroll.dataset.fadeBound = '1';
-  scroll.addEventListener('scroll', syncProjectBarFades, { passive: true });
-  window.addEventListener('resize', syncProjectBarFades, { passive: true });
-  if (typeof ResizeObserver !== 'undefined') {
-    new ResizeObserver(syncProjectBarFades).observe(scroll);
-  }
-}
-
-function clearProjectDropMarkers(root = document) {
-  root.querySelectorAll('.project-toggle.is-drop-before, .project-toggle.is-drop-after').forEach((el) => {
-    el.classList.remove('is-drop-before', 'is-drop-after');
-  });
+  renderTasksFromState();
 }
 
 async function reorderProjectsByDrag(dragId, targetId, afterTarget) {
@@ -488,7 +386,7 @@ async function reorderProjectsByDrag(dragId, targetId, afterTarget) {
   if (ids.every((id, idx) => id === (STATE.projects[idx] && STATE.projects[idx].id))) return;
   const byId = new Map((STATE.projects || []).map((p) => [p.id, p]));
   STATE.projects = ids.map((id) => byId.get(id)).filter(Boolean);
-  renderProjectToggleBar();
+  renderTasksFromState();
   try {
     const d = await apiNoProject('/api/projects/reorder', {
       method: 'POST',
@@ -498,33 +396,25 @@ async function reorderProjectsByDrag(dragId, targetId, afterTarget) {
     if (activeId && STATE.projects.some((p) => p.id === activeId)) {
       STATE.projectId = activeId;
     }
-    renderProjectToggleBar();
+    renderTasksFromState();
   } catch (e) {
     toast(e.message, { type: 'error' });
     await loadProjectsList();
   }
 }
 
-async function switchProject(id) {
-  if (!id || id === STATE.projectId) return;
-  await apiNoProject(`/api/projects/${encodeURIComponent(id)}/activate`, { method: 'POST', body: '{}' });
-  STATE.projectId = id;
-  clearTaskSelection();
-  await loadProjectsList();
-  await loadProject();
-  await loadTasks();
-  await restoreSelectedTaskForProject();
-}
-
 async function removeProject(id) {
-  if (!confirm('Remove this project from the web UI list? Task files on disk are not deleted.')) return;
+  const project = (STATE.projects || []).find((p) => p.id === id);
+  const name = project ? (project.name || project.id) : id;
+  if (!confirm(`Remove ${name} from Loom?\n\nLoom forgets the folder and its tasks disappear from this list. Nothing on disk is deleted.`)) return;
   try {
     await apiNoProject(`/api/projects/${encodeURIComponent(id)}`, { method: 'DELETE' });
-    clearTaskSelection();
+    delete STATE.tasksByProject[id];
+    if (STATE.projectId === id) clearTaskSelection();
     await loadProjectsList();
     await loadProject();
-    await loadTasks();
-    await restoreSelectedTaskForProject();
+    if (STATE.projectId && !STATE.tasksByProject[STATE.projectId]) await loadTasks();
+    renderTasksFromState();
   } catch (e) {
     toast(e.message, { type: 'error' });
   }
@@ -666,19 +556,24 @@ async function submitAddProject() {
 
 function updateCodeRootPreview() {
   const pattern = (document.getElementById('project-code-root-pattern')?.value || '.').trim() || '.';
-  const project = (STATE.projects || []).find((p) => p.id === STATE.projectId);
+  const pid = STATE.codeRootProjectId || STATE.projectId;
+  const project = (STATE.projects || []).find((p) => p.id === pid);
   const root = (project && project.path) || '';
   const resolved = pattern === '.' ? root : `${root.replace(/\/+$/, '')}/${pattern.replace(/^\/+/, '')}`;
   const target = document.getElementById('project-code-root-resolved');
   if (target) target.textContent = resolved || '—';
 }
 
-function openCodeRootModal() {
-  if (!STATE.projectId) return;
+function openCodeRootModal(projectId = STATE.projectId) {
+  if (!projectId) return;
+  STATE.codeRootProjectId = projectId;
+  const project = (STATE.projects || []).find((p) => p.id === projectId);
   const modal = document.getElementById('code-root-modal');
   const input = document.getElementById('project-code-root-pattern');
   const status = document.getElementById('code-root-status');
-  if (input) input.value = STATE.codeRootPattern || '.';
+  const title = document.getElementById('code-root-modal-title');
+  if (title) title.textContent = project ? `Code root for ${project.name || project.id}` : 'Project code root';
+  if (input) input.value = (project && project.codeRootPattern) || '.';
   if (status) status.textContent = '';
   updateCodeRootPreview();
   if (modal) modal.hidden = false;
@@ -691,7 +586,8 @@ function closeCodeRootModal() {
 }
 
 async function saveCodeRootPattern() {
-  if (!STATE.projectId) return;
+  const pid = STATE.codeRootProjectId || STATE.projectId;
+  if (!pid) return;
   const input = document.getElementById('project-code-root-pattern');
   const status = document.getElementById('code-root-status');
   const button = document.getElementById('btn-code-root-save');
@@ -699,15 +595,17 @@ async function saveCodeRootPattern() {
   if (button) button.disabled = true;
   if (status) status.textContent = 'Saving…';
   try {
-    const result = await apiNoProject(`/api/projects/${encodeURIComponent(STATE.projectId)}/code-root`, {
+    const result = await apiNoProject(`/api/projects/${encodeURIComponent(pid)}/code-root`, {
       method: 'POST',
       body: JSON.stringify({ pattern }),
     });
-    STATE.codeRootPattern = result.pattern || '.';
-    STATE.codeRootPath = result.path || '';
+    if (pid === STATE.projectId) {
+      STATE.codeRootPattern = result.pattern || '.';
+      STATE.codeRootPath = result.path || '';
+    }
     await loadProjectsList();
     closeCodeRootModal();
-    toast(`Code root: ${STATE.codeRootPath}`, { type: 'success' });
+    toast(`Code root: ${result.path || pattern}`, { type: 'success' });
   } catch (error) {
     if (status) status.textContent = error.message || 'Failed to save code root.';
   } finally {
@@ -715,9 +613,26 @@ async function saveCodeRootPattern() {
   }
 }
 
+// Skills, models and the code root differ per project. The create dialog asks
+// for another project's without moving the open task's context.
+async function fetchProjectInfo(projectId) {
+  return apiNoProject(`/api/project?project=${encodeURIComponent(projectId)}`);
+}
+
+function applyProjectInfo(d) {
+  STATE.skillsPath = d.skillsPath || '';
+  STATE.skillsOptions = Array.isArray(d.skillsOptions) ? d.skillsOptions : [];
+  STATE.codeRootPattern = d.codeRootPattern || '.';
+  STATE.codeRootPath = d.codeRootPath || d.projectRoot || '';
+  STATE.modelDefaults = d.modelDefaults || STATE.modelDefaults;
+  STATE.modelOptions = d.modelOptions || STATE.modelOptions;
+  renderSkillsPicker();
+  renderTaskSkillsPicker(STATE.currentMeta || {});
+  renderTaskModelPicker(STATE.currentMeta || {});
+}
+
 async function loadProject() {
   if (!STATE.projectId) {
-    $('#hdr-project').textContent = '(select a project above)';
     STATE.skillsPath = '';
     STATE.skillsOptions = [];
     STATE.codeRootPattern = '.';
@@ -728,23 +643,7 @@ async function loadProject() {
     renderTaskSkillsPicker();
     return;
   }
-  const d = await api('/api/project');
-  const meta = (STATE.projects || []).find((x) => x.id === STATE.projectId);
-  const pathLine = d.projectRoot || '';
-  $('#hdr-project').textContent = meta ? `${meta.name} — ${pathLine}` : pathLine;
-  STATE.skillsPath = d.skillsPath || '';
-  STATE.skillsOptions = Array.isArray(d.skillsOptions) ? d.skillsOptions : [];
-  STATE.codeRootPattern = d.codeRootPattern || '.';
-  STATE.codeRootPath = d.codeRootPath || d.projectRoot || '';
-  const codeRootButton = document.getElementById('btn-code-root-open');
-  if (codeRootButton) {
-    codeRootButton.title = `Code root: ${STATE.codeRootPath}`;
-  }
-  STATE.modelDefaults = d.modelDefaults || STATE.modelDefaults;
-  STATE.modelOptions = d.modelOptions || STATE.modelOptions;
-  renderSkillsPicker();
-  renderTaskSkillsPicker(STATE.currentMeta || {});
-  renderTaskModelPicker(STATE.currentMeta || {});
+  applyProjectInfo(await fetchProjectInfo(STATE.projectId));
 }
 
 // skills_path holds one or more ;-joined paths (multiple skills used together).
@@ -1450,132 +1349,17 @@ async function loadTasks() {
   }
   // Replace the list only once the new one arrives; clearing first made a
   // failed refresh look like the project had lost all its tasks.
+  const pid = STATE.projectId;
   const { tasks } = await api('/api/tasks');
-  STATE.tasks = tasks || [];
+  STATE.tasksByProject[pid] = tasks || [];
+  if (STATE.projectId === pid) STATE.tasks = STATE.tasksByProject[pid];
   renderTasksFromState();
 }
 
-function clearTaskDropMarkers(root = document) {
-  root.querySelectorAll('.task-list li.is-drop-before, .task-list li.is-drop-after').forEach((el) => {
-    el.classList.remove('is-drop-before', 'is-drop-after');
-  });
-}
-
-async function reorderTasksByDrag(dragSlug, targetSlug, afterTarget) {
-  const slugs = (STATE.tasks || []).map((t) => t.slug);
-  const from = slugs.indexOf(dragSlug);
-  const target = slugs.indexOf(targetSlug);
-  if (from < 0 || target < 0 || dragSlug === targetSlug) return;
-  slugs.splice(from, 1);
-  const targetAfterRemoval = slugs.indexOf(targetSlug);
-  slugs.splice(targetAfterRemoval + (afterTarget ? 1 : 0), 0, dragSlug);
-  if (slugs.every((slug, idx) => slug === (STATE.tasks[idx] && STATE.tasks[idx].slug))) return;
-  const bySlug = new Map((STATE.tasks || []).map((t) => [t.slug, t]));
-  STATE.tasks = slugs.map((slug) => bySlug.get(slug)).filter(Boolean);
-  renderTasksFromState();
-  try {
-    const d = await api('/api/tasks/reorder', {
-      method: 'POST',
-      body: JSON.stringify({ slugs }),
-    });
-    STATE.tasks = d.tasks || STATE.tasks || [];
-    renderTasksFromState();
-  } catch (e) {
-    toast(e.message, { type: 'error' });
-    await loadTasks();
-  }
-}
-
+// The sidebar tree lives in workspace.js; the name stays for the many callers
+// that only mean "the task list changed".
 function renderTasksFromState() {
-  const ul = $('#task-list');
-  if (!ul) return;
-  const selected = STATE.slug;
-  ul.innerHTML = '';
-  const all = STATE.tasks || [];
-  const filter = (STATE.taskFilter || '').trim().toLowerCase();
-  const tasks = filter
-    ? all.filter((t) => `${t.title || ''} ${t.slug || ''}`.toLowerCase().includes(filter))
-    : all;
-  const countEl = document.getElementById('task-count');
-  if (countEl) {
-    countEl.textContent = filter && all.length !== tasks.length
-      ? `${tasks.length}/${all.length}`
-      : (all.length ? String(all.length) : '');
-  }
-  if (!tasks.length) {
-    const li = document.createElement('li');
-    li.className = 'task-list__empty';
-    if (!STATE.projectId) li.textContent = 'Select or add a project';
-    else if (filter) li.textContent = `No tasks match "${filter}"`;
-    else li.textContent = 'No tasks yet';
-    ul.appendChild(li);
-    return;
-  }
-  const fragment = document.createDocumentFragment();
-  for (const t of tasks) {
-    const li = document.createElement('li');
-    li.dataset.slug = t.slug;
-    li.draggable = true;
-    li.tabIndex = 0;
-    li.title = `${t.slug} · ${taskBackendLabel(t)}`;
-    if (t.slug === selected) li.classList.add('active');
-    const typeLabel = isArKind(t.kind) ? 'AR' : agentLabel(t.agent);
-    const kindClass = isArKind(t.kind) ? 'ar' : (t.kind || 'agent');
-    li.innerHTML =
-      `<div class="task-title-row"><span class="task-title">${escapeHtml(t.title)}</span>` +
-      `<span class="task-kind task-kind--${escapeHtml(kindClass)}">${escapeHtml(typeLabel)}</span></div>`;
-    li.addEventListener('dragstart', (ev) => {
-      TASK_DRAG_SLUG = t.slug;
-      TASK_JUST_DRAGGED = true;
-      li.classList.add('is-dragging');
-      ev.dataTransfer.effectAllowed = 'move';
-      ev.dataTransfer.setData('text/plain', t.slug);
-    });
-    li.addEventListener('dragover', (ev) => {
-      if (!TASK_DRAG_SLUG || TASK_DRAG_SLUG === t.slug) return;
-      ev.preventDefault();
-      ev.dataTransfer.dropEffect = 'move';
-      const rect = li.getBoundingClientRect();
-      const after = ev.clientY > rect.top + (rect.height / 2);
-      clearTaskDropMarkers(ul);
-      li.classList.toggle('is-drop-before', !after);
-      li.classList.toggle('is-drop-after', after);
-    });
-    li.addEventListener('drop', async (ev) => {
-      if (!TASK_DRAG_SLUG || TASK_DRAG_SLUG === t.slug) return;
-      ev.preventDefault();
-      const dragSlug = ev.dataTransfer.getData('text/plain') || TASK_DRAG_SLUG;
-      const after = li.classList.contains('is-drop-after');
-      clearTaskDropMarkers(ul);
-      await reorderTasksByDrag(dragSlug, t.slug, after);
-    });
-    li.addEventListener('dragend', () => {
-      TASK_DRAG_SLUG = '';
-      li.classList.remove('is-dragging');
-      clearTaskDropMarkers(ul);
-      setTimeout(() => { TASK_JUST_DRAGGED = false; }, 0);
-    });
-    li.addEventListener('click', () => {
-      if (TASK_JUST_DRAGGED) return;
-      if (STATE.slug === t.slug) {
-        // User explicitly deselected -> stop auto-restoring it for this project.
-        forgetSelectedTask();
-        clearTaskSelection();
-      } else {
-        selectTask(t.slug);
-        if (isMobileViewport()) setSidebarOpen(false);
-      }
-    });
-    li.addEventListener('keydown', (event) => {
-      if (event.key === 'Enter' || event.key === ' ') {
-        event.preventDefault();
-        li.click();
-      }
-    });
-    fragment.appendChild(li);
-  }
-  ul.appendChild(fragment);
-  applyActivity();
+  if (typeof renderProjectTree === 'function') renderProjectTree();
 }
 
 function clearTaskSelection() {
@@ -1589,11 +1373,14 @@ function clearTaskSelection() {
     clearInterval(STATE.paneTimer);
     STATE.paneTimer = null;
   }
-  document.querySelectorAll('#task-list li').forEach((li) => li.classList.remove('active'));
+  disconnectTerminal();
+  if (typeof chatReset === 'function') chatReset();
+  if (typeof filesReset === 'function') filesReset();
   restorePaneDraftForTask(null);
   $('#task-view').hidden = true;
   $('#task-empty').hidden = false;
   renderTaskSkillsPicker({});
+  if (typeof wsTaskClosed === 'function') wsTaskClosed();
 }
 
 const _LAST_TASK_LS_KEY = 'loom.lastTaskByProject';
@@ -1650,9 +1437,10 @@ async function selectTask(slug) {
   STATE.changesSelected = '';
   resetArLab();
   ackActivity(slug);
-  document.querySelectorAll('#task-list li').forEach((li) => {
-    li.classList.toggle('active', li.dataset.slug === slug);
-  });
+  STATE.paneAlive = null;
+  if (typeof chatReset === 'function') chatReset();
+  if (typeof filesReset === 'function') filesReset();
+  if (typeof wsTaskOpened === 'function') wsTaskOpened(slug);
 
   // ---------- Optimistic render ----------
   // The sidebar's loadTasks() already cached the full TaskMeta for every
@@ -1667,8 +1455,8 @@ async function selectTask(slug) {
     $('#task-empty').hidden = true;
     $('#task-view').hidden = false;
     $('#task-title').textContent = cached.title || slug;
-    $('#task-backend').textContent = taskBackendLabel(cached);
     $('#task-goal').textContent = cached.general_goal || '';
+    if (typeof wsRenderTaskHeader === 'function') wsRenderTaskHeader(cached);
     $('#inp-interview-target').value = cached.tmux_interview_target || '';
     setTmuxOutputText(cached.tmux_interview_target
       ? 'Loading agent pane…'
@@ -1694,9 +1482,8 @@ async function selectTask(slug) {
     const msg = isTransientApiError(err)
       ? 'Temporary gateway error while refreshing task details; kept cached task view.'
       : `Failed to refresh task details: ${err.message || err}`;
-    const backend = document.getElementById('task-backend');
-    if (backend && cached) backend.textContent = `${backend.textContent.replace(/ · refresh failed.*$/, '')} · refresh failed`;
     if (!cached) setTmuxOutputText(msg);
+    else toast(msg, { type: 'error' });
     return;
   }
   // The user may have clicked a different task while we were awaiting -
@@ -1707,9 +1494,9 @@ async function selectTask(slug) {
   $('#task-empty').hidden = true;
   $('#task-view').hidden = false;
   $('#task-title').textContent = d.meta.title || slug;
-  $('#task-backend').textContent = taskBackendLabel(d.meta);
   $('#task-goal').textContent = d.meta.general_goal || '';
   STATE.currentMeta = d.meta || null;
+  if (typeof wsRenderTaskHeader === 'function') wsRenderTaskHeader(d.meta);
   STATE.worktreeStatuses = d.worktree_statuses || [];
   STATE.skillsMissing = d.skills_missing || [];
   STATE.taskRoot = d.task_root || '';
@@ -1746,7 +1533,10 @@ function applyAgentLabels(meta) {
   const pasteBtn = document.getElementById('btn-interview-paste');
   const stopBtn = document.getElementById('btn-interview-stop');
   if (startBtn) startBtn.textContent = `Start ${label}`;
-  if (pasteBtn) pasteBtn.textContent = isArKind(meta && meta.kind) ? 'Send AR prompt' : 'Start Deep Interview';
+  if (pasteBtn) {
+    const text = pasteBtn.querySelector('.flow-btn__label') || pasteBtn;
+    text.textContent = isArKind(meta && meta.kind) ? 'Send AR prompt' : 'Deep Interview';
+  }
   if (stopBtn) stopBtn.textContent = `Stop ${label}`;
   const heading = document.querySelector('.tab-panel[data-panel="claude"] .terminal-card__bar h4');
   if (heading) heading.textContent = `${label} Terminal`;
@@ -1949,14 +1739,23 @@ async function deleteSelectedTask() {
   const title = $('#task-title')?.textContent || slug;
   const ok = confirm(
     `Delete task "${title}" (${slug})?\n\n` +
-    `This permanently removes .RUD/${slug}/, including PLAN.md, the worktree, and task metadata. ` +
-    `Running tmux sessions are not stopped automatically.`
+    `The task's folder is deleted - .RUD/${slug}/, its plan, notes and worktree checkout. ` +
+    `A running agent is stopped first. Branches and commits stay in the repository they came from; ` +
+    `push first if they only exist here.`
   );
   if (!ok) return;
   const btn = document.getElementById('btn-delete-task');
   if (btn) btn.disabled = true;
   try {
+    // The server deletes the directory under a pane still running in it, so
+    // the pane goes first. Best effort: one already gone is no reason to keep
+    // the task.
+    if (STATE.currentMeta && STATE.currentMeta.tmux_interview_target) {
+      await api('/api/tasks/' + encodeURIComponent(slug) + '/claude/stop', { method: 'POST', body: '{}' })
+        .catch(() => {});
+    }
     await api('/api/tasks/' + encodeURIComponent(slug), { method: 'DELETE' });
+    forgetSelectedTask();
     clearTaskSelection();
     await loadTasks();
   } catch (e) {
@@ -2037,6 +1836,7 @@ async function refreshInterviewPreview() {
   // terminal is attached to the current pane (idempotent; reconnects if dropped).
   const target = termTarget();
   if (!target) { disconnectTerminal(); return; }
+  if (STATE.activePanel !== 'claude') return;
   connectTerminal(target, false);
 }
 
@@ -2113,7 +1913,7 @@ function renderChanges(d) {
   const totalFiles = worktrees.reduce((n, wt) => n + ((wt.files || []).length), 0);
   if (!worktrees.length) {
     const agent = agentLabel(STATE.currentMeta && STATE.currentMeta.agent);
-    body.innerHTML = '<div class="changes-empty">No worktree registered for this task yet. Create one from the ' + escapeHtml(agent) + ' tab to see changes here.</div>';
+    body.innerHTML = '<div class="changes-empty">No worktree for this task yet. Add one above with + Add worktree to see its changes here.</div>';
     return;
   }
   if (!totalFiles) {
@@ -2945,15 +2745,16 @@ function startPanePolling() {
     // stream of requests when nobody's looking. visibilitychange re-syncs on return.
     if (document.hidden) return;
     if (!STATE.slug) return;
-    const claudeTab = document.querySelector('.tab-panel[data-panel="claude"]');
-    if (!claudeTab || claudeTab.hidden) return;
+    const terminalOpen = STATE.activePanel === 'claude';
     // The markdown preview tracks PLAN.md edits, so refresh it every cycle (4s).
-    refreshInterviewPreview(true);
+    if (terminalOpen) refreshInterviewPreview(true);
     // Sessions list + scanned md files change rarely — poll them ~every 12s
-    // instead of every cycle to cut redundant requests by ~2/3.
+    // instead of every cycle to cut redundant requests by ~2/3. Sessions are
+    // polled on every tab: they say whether the pane is alive, which the
+    // header's status chip shows.
     STATE.paneTick = (STATE.paneTick || 0) + 1;
     if (STATE.paneTick % 3 === 0) {
-      refreshTaskTemplates();
+      if (terminalOpen) refreshTaskTemplates();
       refreshClaudeSessions();
     }
   }, 4000);
@@ -2963,11 +2764,10 @@ function startPanePolling() {
 // waiting up to a full poll interval (and the paused pollers resume on their own).
 document.addEventListener('visibilitychange', () => {
   if (document.hidden || !STATE.slug) return;
-  const claudeTab = document.querySelector('.tab-panel[data-panel="claude"]');
-  if (claudeTab && !claudeTab.hidden) {
+  refreshClaudeSessions();
+  if (STATE.activePanel === 'claude') {
     refreshInterviewPreview(true);
     refreshTaskTemplates();
-    refreshClaudeSessions();
   }
 });
 
@@ -2981,7 +2781,9 @@ window.addEventListener('pageshow', (event) => {
 
 async function startInterviewPane() {
   if (!STATE.slug) return;
-  showPanel('claude');
+  // The chat says when the agent is ready; every other tab hands over to the
+  // terminal so the start can be watched.
+  if (STATE.activePanel !== 'chat') showPanel('claude');
   const label = agentLabel(STATE.currentMeta?.agent);
   setTmuxOutputText(`Starting ${label} pane…\nWhen it is ready, click Start Deep Interview to paste the prompt.`);
   revealInterviewTerminal();
@@ -3099,20 +2901,51 @@ Remove obsolete noisy details, but preserve unrelated prior sections. Do not cre
 
 // ===== Modals & sidebar =====
 
-function openCreateModal() {
-  if (!STATE.projectId) {
-    toast('Select or add a project first.', { type: 'error' });
+function openCreateModal(projectId) {
+  const projects = STATE.projects || [];
+  if (!projects.length) {
+    toast('Add a project first.', { type: 'error' });
+    openAddProjectModal();
     return;
   }
+  const select = document.getElementById('new-project-select');
+  const chosen = projects.some((p) => p.id === projectId) ? projectId
+    : (projects.some((p) => p.id === STATE.projectId) ? STATE.projectId : projects[0].id);
+  if (select) {
+    select.innerHTML = projects
+      .map((p) => `<option value="${escapeHtml(p.id)}">${escapeHtml(p.name || p.id)}</option>`)
+      .join('');
+    select.value = chosen;
+  }
+  STATE.createProjectId = chosen;
   const modal = $('#create-modal');
   modal.hidden = false;
   $('#new-task-status').textContent = '';
+  if (chosen !== STATE.projectId) onCreateProjectChange();
   updateCreateAgentHint();
   requestAnimationFrame(() => $('#new-title').focus());
 }
 
+// Skills and models come from the chosen project; the open task's project
+// gets its own back when the dialog closes.
+async function onCreateProjectChange() {
+  const select = document.getElementById('new-project-select');
+  const pid = select ? select.value : STATE.projectId;
+  STATE.createProjectId = pid;
+  try {
+    applyProjectInfo(await fetchProjectInfo(pid));
+    updateCreateAgentHint(true);
+  } catch (e) {
+    $('#new-task-status').textContent = e.message;
+  }
+}
+
 function closeCreateModal() {
   $('#create-modal').hidden = true;
+  if (STATE.createProjectId && STATE.createProjectId !== STATE.projectId && STATE.projectId) {
+    loadProject().catch(() => {});
+  }
+  STATE.createProjectId = null;
 }
 
 const AGENT_HINTS = {
@@ -3350,11 +3183,9 @@ function toggleSidebar() {
   });
 })();
 
-document.getElementById('btn-add-project').addEventListener('click', openAddProjectModal);
 document.getElementById('btn-add-project-close').addEventListener('click', closeAddProjectModal);
 document.getElementById('btn-add-project-cancel').addEventListener('click', closeAddProjectModal);
 document.getElementById('btn-add-project-save').addEventListener('click', submitAddProject);
-document.getElementById('btn-code-root-open').addEventListener('click', openCodeRootModal);
 document.getElementById('btn-code-root-close').addEventListener('click', closeCodeRootModal);
 document.getElementById('btn-code-root-cancel').addEventListener('click', closeCodeRootModal);
 document.getElementById('btn-code-root-save').addEventListener('click', saveCodeRootPattern);
@@ -3378,8 +3209,6 @@ $('#add-project-modal').addEventListener('click', (event) => {
 $('#code-root-modal').addEventListener('click', (event) => {
   if (event.target.id === 'code-root-modal') closeCodeRootModal();
 });
-
-document.getElementById('btn-tasks-refresh').addEventListener('click', loadTasks);
 
 (function initTaskFilter() {
   const inp = document.getElementById('task-filter');
@@ -3468,11 +3297,14 @@ async function saveTaskMeta(patch) {
     onSave: (general_goal) => saveTaskMeta({ general_goal }),
   });
 })();
-document.getElementById('btn-create-open').addEventListener('click', openCreateModal);
-document.getElementById('btn-empty-create').addEventListener('click', openCreateModal);
+document.getElementById('btn-empty-create').addEventListener('click', () => {
+  if ((STATE.projects || []).length) openCreateModal();
+  else openAddProjectModal();
+});
 document.getElementById('new-agent-select').addEventListener(
   'change', () => updateCreateAgentHint(true)
 );
+document.getElementById('new-project-select').addEventListener('change', onCreateProjectChange);
 document.getElementById('btn-create-close').addEventListener('click', closeCreateModal);
 document.getElementById('btn-create-cancel').addEventListener('click', closeCreateModal);
 document.getElementById('create-modal').addEventListener('click', (event) => {
@@ -3483,7 +3315,8 @@ document.addEventListener('keydown', (event) => {
   // The terminal owns Escape; it is a core navigation key in Cursor/Claude
   // TUIs, not a request to close a Loom modal.
   if (event.target && event.target.closest && event.target.closest('.xterm')) return;
-  if (!$('#ar-review-modal').hidden) closeArReview();
+  if (typeof wsHandleEscape === 'function' && wsHandleEscape()) event.preventDefault();
+  else if (!$('#ar-review-modal').hidden) closeArReview();
   else if (!$('#preview-modal').hidden) closeFullscreenPreview();
   else if (!$('#notes-modal').hidden) closeNotesModal();
   else if (!$('#worktree-modal').hidden) closeWorktreeModal();
@@ -3551,11 +3384,15 @@ function handleEditorTab(ev, editor) {
   return true;
 }
 
-async function openNotesModal() {
-  if (!STATE.projectId) {
+async function openNotesModal(projectId = STATE.projectId) {
+  if (!projectId) {
     toast('Select or add a project first.', { type: 'error' });
     return;
   }
+  STATE.notesProjectId = projectId;
+  const project = (STATE.projects || []).find((p) => p.id === projectId);
+  const titleEl = $('#notes-modal-title');
+  if (titleEl) titleEl.textContent = project ? `Notes · ${project.name || project.id}` : 'Notes';
   const modal = $('#notes-modal');
   if (!modal) return;
   modal.hidden = false;
@@ -3567,10 +3404,11 @@ async function openNotesModal() {
   status.textContent = 'Loading…';
   editor.disabled = true;
   try {
-    const project = await api('/api/project');
-    const projectRoot = project.projectRoot || '';
+    const scope = `project=${encodeURIComponent(projectId)}`;
+    const info = await apiNoProject(`/api/project?${scope}`);
+    const projectRoot = info.projectRoot || '';
     if (pathEl) pathEl.textContent = projectRoot ? `${projectRoot}/.RUD/NOTES.md` : '.RUD/NOTES.md';
-    const d = await api('/api/notes');
+    const d = await apiNoProject(`/api/notes?${scope}`);
     editor.value = d.content || '';
     preview.innerHTML = renderMarkdownWithAssets(editor.value, markdownAssetResolver('notes'));
     typesetMath(preview);
@@ -3598,7 +3436,8 @@ async function saveNotes() {
   STATE.notesSaving = true;
   status.textContent = 'Saving…';
   try {
-    await api('/api/notes', {
+    const pid = STATE.notesProjectId || STATE.projectId;
+    await apiNoProject(`/api/notes?project=${encodeURIComponent(pid)}`, {
       method: 'PUT',
       body: JSON.stringify({ content: editor.value }),
     });
@@ -3664,7 +3503,7 @@ async function saveNotes() {
   }
 })();
 
-document.getElementById('btn-notes-open').addEventListener('click', openNotesModal);
+document.getElementById('btn-notes-open').addEventListener('click', () => openNotesModal());
 document.getElementById('btn-notes-close').addEventListener('click', closeNotesModal);
 document.getElementById('btn-notes-save').addEventListener('click', saveNotes);
 document.getElementById('notes-modal').addEventListener('click', (event) => {
@@ -4283,6 +4122,11 @@ function renderClaudeInfo(meta, claude, statuses) {
     pillEl.textContent = alive ? 'alive' : 'down';
     pillEl.dataset.state = alive ? 'alive' : 'down';
   }
+  if (claude && Object.keys(claude).length) {
+    STATE.claudeInfo = claude;
+    STATE.paneAlive = !!claude.tmux_alive;
+    if (typeof wsUpdateStatusChip === 'function') wsUpdateStatusChip();
+  }
   if (!sessHost) return;
   const sessions = Array.isArray(claude.sessions) ? claude.sessions : [];
   const running = claude.agent_running === true;
@@ -4580,7 +4424,12 @@ async function resumeClaudeSession(sessionId) {
 // once they finish — otherwise the next keystroke dies on the button.
 function clickThenFocusPane(handler) {
   return async (event) => {
-    try { await handler(event); } finally { focusTerminalSoon(); }
+    try {
+      await handler(event);
+    } finally {
+      focusTerminalSoon();
+      if (typeof chatPoke === 'function') chatPoke();
+    }
   };
 }
 document.getElementById('btn-interview-start').addEventListener('click', clickThenFocusPane(startInterviewPane));
@@ -4697,7 +4546,6 @@ document.getElementById('btn-interview-stop').addEventListener('click', stopClau
 const termKillBtn = document.getElementById('term-kill');
 if (termKillBtn) termKillBtn.addEventListener('click', stopClaudePane);
 
-document.getElementById('btn-delete-task').addEventListener('click', deleteSelectedTask);
 
 document.getElementById('btn-new-task').addEventListener('click', async () => {
   const title = $('#new-title').value.trim();
@@ -4745,11 +4593,17 @@ document.getElementById('btn-new-task').addEventListener('click', async () => {
       delete body.general_goal;
     }
     if (skills_path) body.skills_path = skills_path;
-    const { meta } = await api('/api/tasks', { method: 'POST', body: JSON.stringify(body) });
+    const pid = STATE.createProjectId || STATE.projectId;
+    const { meta } = await apiNoProject(`/api/tasks?project=${encodeURIComponent(pid)}`, {
+      method: 'POST',
+      body: JSON.stringify(body),
+    });
+    STATE.createProjectId = null;  // the new task's project becomes the open one
     resetCreateForm();
     closeCreateModal();
-    await loadTasks();
-    await selectTask(meta.slug);
+    if (typeof wsReloadProjectTasks === 'function') await wsReloadProjectTasks(pid);
+    if (typeof openTask === 'function') await openTask(pid, meta.slug);
+    else await selectTask(meta.slug);
   } catch (e) {
     status.textContent = e.message;
   } finally {
@@ -4760,8 +4614,10 @@ document.getElementById('btn-new-task').addEventListener('click', async () => {
 async function loadWorkspace() {
   await loadProjectsList();
   await loadProject();
-  await loadTasks();
-  await restoreSelectedTaskForProject();
+  if (typeof wsLoadAllTasks === 'function') await wsLoadAllTasks();
+  else await loadTasks();
+  if (typeof wsRestoreSelection === 'function') await wsRestoreSelection();
+  else await restoreSelectedTaskForProject();
 }
 
 (function initOfflineRetry() {
@@ -4779,11 +4635,14 @@ async function loadWorkspace() {
   });
 })();
 
-(async function init() {
+// Started once every script on the page has run: the sidebar, chat and files
+// code that the first load renders through lives in the files after this one.
+async function init() {
   buildTabs();
   initMarkdownPreviews();
   initFullscreenPreviews();
   loadLastTaskMap();
+  if (typeof wsInit === 'function') wsInit();
   pollActivity();
   STATE.activityTimer = setInterval(() => {
     if (!document.hidden) pollActivity();
@@ -4794,7 +4653,9 @@ async function loadWorkspace() {
     console.error(e);
     toast(e.message, { type: 'error' });
   }
-})();
+}
+if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', init);
+else init();
 
 
 /* ---- Loom server switcher -------------------------------------------------

@@ -115,6 +115,9 @@ loom-zhongzhu/
 │   ├── web_static/
 │   │   ├── index.html
 │   │   ├── app.js
+│   │   ├── workspace.js
+│   │   ├── chat.js
+│   │   ├── files.js
 │   │   ├── app.css
 │   │   ├── factory.html
 │   │   ├── factory.js
@@ -462,9 +465,14 @@ Loom 没有 React/Vue 构建系统；前端是原生 HTML、CSS、JavaScript。
 文件：
 
 - [`loom/web_static/index.html`](loom/web_static/index.html)；
-- [`loom/web_static/app.js`](loom/web_static/app.js)；
+- [`loom/web_static/app.js`](loom/web_static/app.js)：任务本身（终端、PLAN.md、Changes、AR tab、建任务）；
+- [`loom/web_static/workspace.js`](loom/web_static/workspace.js)：外框——侧栏（所有项目及其任务、All / Working / To review 筛选）、Workspace 总览、右侧活跃任务 dock、任务头部的 agent / 状态 chip 与菜单、⌘K 快速切换；
+- [`loom/web_static/chat.js`](loom/web_static/chat.js)：Chat tab（`/conversation` 对话流、提问卡片、输入框直接打进 agent pane）；
+- [`loom/web_static/files.js`](loom/web_static/files.js)：Files tab（任务目录树，PLAN.md / WIKI.md 可编辑）；
 - [`loom/web_static/app.css`](loom/web_static/app.css)；
 - [`loom/web_static/vendor/`](loom/web_static/vendor/)。
+
+布局与 loom-desktop 一致：左侧按项目分组的任务（项目默认收起），中间是总览或任务（Chat / Terminal / Files / Changes 四个 tab），右侧是可折叠的活跃任务 dock。运行中 / 完成未看的任务用同一套光圈（`.is-working` / `.is-finished`）。
 
 负责：
 
@@ -1011,7 +1019,7 @@ loom/skills/
 然后根据界面进入：
 
 ```text
-主 Loom UI          → loom/web_static/app.js
+主 Loom UI          → loom/web_static/app.js（任务）/ workspace.js（侧栏、总览、dock）/ chat.js / files.js
 Research Factory   → loom/web_static/factory.js
 Kernel Lab         → loom/kernel_hub/
 方法论              → loom/skills/
