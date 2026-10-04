@@ -1129,11 +1129,55 @@ def test_ensure_ar_root(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None
     assert created is False
 
 
-def test_ar_root_defaults_to_home(monkeypatch: pytest.MonkeyPatch) -> None:
+@pytest.fixture()
+def fresh_home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    home = tmp_path / "home"
+    home.mkdir()
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.delenv("LOOM_AR_ROOT", raising=False)
+    return home
+
+
+def test_ar_root_is_loom_in_a_fresh_home(fresh_home: Path) -> None:
     from loom.paths import ar_root
 
-    monkeypatch.delenv("LOOM_AR_ROOT", raising=False)
-    assert ar_root() == Path.home() / "ar"
+    assert ar_root() == fresh_home / "loom"
+    (fresh_home / "ar").mkdir()  # an unrelated ~/ar folder is not a Loom root
+    assert ar_root() == fresh_home / "loom"
+
+
+def test_ar_root_keeps_an_existing_ar_install(fresh_home: Path) -> None:
+    from loom.paths import ar_root
+
+    (fresh_home / "ar" / ".RUD").mkdir(parents=True)
+    (fresh_home / "loom").mkdir()
+    assert ar_root() == fresh_home / "ar"
+
+
+def test_ar_root_stays_put_once_established(fresh_home: Path) -> None:
+    from loom.paths import ar_root
+
+    (fresh_home / "loom" / ".RUD").mkdir(parents=True)
+    (fresh_home / "ar" / ".RUD").mkdir(parents=True)  # tasks in an unrelated ~/ar project
+    assert ar_root() == fresh_home / "loom"
+
+
+def test_ar_root_never_lands_in_loom_source(fresh_home: Path) -> None:
+    from loom.paths import ar_root
+
+    checkout = fresh_home / "loom"
+    (checkout / "loom").mkdir(parents=True)
+    (checkout / "loom" / "__init__.py").write_text("")
+    (checkout / "pyproject.toml").write_text('[project]\nname = "loom"\n')
+    assert ar_root() == fresh_home / "ar"
+
+
+def test_ar_root_override_wins(fresh_home: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    from loom.paths import ar_root
+
+    (fresh_home / "ar" / ".RUD").mkdir(parents=True)
+    monkeypatch.setenv("LOOM_AR_ROOT", str(fresh_home / "elsewhere"))
+    assert ar_root() == fresh_home / "elsewhere"
 
 
 def test_work_layout(tmp_path: Path) -> None:

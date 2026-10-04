@@ -230,5 +230,8 @@ revision (before the burial commit on 2026-08-25).
 ~/.claude/projects/<encoded-cwd>/<session-uuid>.jsonl   # agent transcripts
 ```
 
-Factory (AR) tasks live in their own always-registered project (`~/ar` by
-default, `LOOM_AR_ROOT` moves it) rather than inside a code repo.
+Factory (AR) tasks live in their own always-registered project, `~/loom`
+(the visible research folder, not the hidden `~/.loom` state above), rather
+than inside a code repo. Installs that already have `~/ar` keep it, as do
+machines whose `~/loom` is a checkout of Loom's own source; `LOOM_AR_ROOT`
+moves it anywhere.

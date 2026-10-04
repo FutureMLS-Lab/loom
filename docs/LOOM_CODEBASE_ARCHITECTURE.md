@@ -261,10 +261,11 @@ Kernel Hub 是可选的大型子系统；[`pyproject.toml`](pyproject.toml) 明�
 Auto Research 默认存放在：
 
 ```text
-~/ar
+~/loom
 ```
 
-可用下面的环境变量覆盖：
+注意它不是隐藏的状态目录 `~/.loom`。已有 `~/ar` 的旧安装继续使用 `~/ar`；
+`~/loom` 是 Loom 源码 checkout 的机器也使用 `~/ar`。可用下面的环境变量覆盖：
 
 ```text
 LOOM_AR_ROOT=/custom/path

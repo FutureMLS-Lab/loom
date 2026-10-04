@@ -29,14 +29,35 @@ AR_ROOT_ENV = "LOOM_AR_ROOT"
 
 
 def ar_root() -> Path:
-    """Home for AR research tasks, created on startup.
+    """Loom's own folder - home for AR research tasks, created on startup.
 
     AR tasks are not tied to any code project - a paper carries its own code
     and manuscript repositories - so they get a root of their own instead of
     burying themselves in the ``.RUD`` of whatever repo happened to spawn them.
+
+    ``~/loom`` by default. ``~/ar``, the original name, stays in use on
+    installs that already have one (their papers live there) and on machines
+    whose ``~/loom`` is a clone of Loom's own source - the conventional
+    checkout location, which must never become a task root. ``LOOM_AR_ROOT``
+    overrides all of this.
     """
     override = os.environ.get(AR_ROOT_ENV, "").strip()
-    return Path(override).expanduser() if override else Path.home() / "ar"
+    if override:
+        return Path(override).expanduser()
+    home = Path.home()
+    preferred, legacy = home / "loom", home / "ar"
+    if _is_loom_checkout(preferred):
+        return legacy
+    # Any project with tasks gets a .RUD, so an unrelated ~/ar project must not
+    # pull the root away from a ~/loom that is already in use.
+    if (legacy / ".RUD").is_dir() and not (preferred / ".RUD").is_dir():
+        return legacy
+    return preferred
+
+
+def _is_loom_checkout(path: Path) -> bool:
+    """Whether *path* is a clone of Loom's own source tree."""
+    return (path / "pyproject.toml").is_file() and (path / "loom" / "__init__.py").is_file()
 
 
 def paper_templates_dir() -> Path:
