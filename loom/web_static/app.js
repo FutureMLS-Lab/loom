@@ -27,8 +27,9 @@ const TABS = [
   { id: 'files', label: 'Files', icon: 'folder' },
   { id: 'changes', label: 'Changes', icon: 'branch' },
 ];
-const DEFAULT_TAB = TABS[0].id;
-const TAB_STORE_KEY = 'loom.taskTab';
+// A task opens on its live pane: the terminal is what the owner looks at
+// first, whichever tab the previous task was left on.
+const DEFAULT_TAB = 'claude';
 
 // An AR task keeps the normal tabs: its author agent runs in the same tmux
 // pane as any other task, and the paper lives in the worktree the Changes
@@ -36,17 +37,7 @@ const TAB_STORE_KEY = 'loom.taskTab';
 const AR_TAB = { id: 'ar', label: 'AR', icon: 'paper' };
 function tabsFor(meta) { return isArKind(meta && meta.kind) ? [AR_TAB, ...TABS] : TABS; }
 
-// Whoever lives in the terminal should not have to re-pick it for every task
-// they open, so the last tab used is the one the next task lands on.
-function rememberedTab() {
-  try {
-    const id = localStorage.getItem(TAB_STORE_KEY);
-    return TABS.some((t) => t.id === id) ? id : DEFAULT_TAB;
-  } catch (_) {
-    return DEFAULT_TAB;
-  }
-}
-function defaultTabFor(meta) { return isArKind(meta && meta.kind) ? AR_TAB.id : rememberedTab(); }
+function defaultTabFor(meta) { return isArKind(meta && meta.kind) ? AR_TAB.id : DEFAULT_TAB; }
 
 const AGENT_LABELS = { cursor: 'Agent', claude: 'Claude', codex: 'Codex' };
 function agentLabel(name) { return AGENT_LABELS[(name || '').toLowerCase()] || 'Agent'; }
@@ -125,7 +116,7 @@ const STATE = {
   launchRoot: '',
   launchRootChildren: [],
   paneTimer: null,
-  activePanel: TABS[0].id,
+  activePanel: DEFAULT_TAB,
   previewCache: {},
   previewDebounce: {},
   sidebarOpen: false,
@@ -272,9 +263,6 @@ function showPanel(id) {
     p.hidden = !on;
   });
   STATE.activePanel = id;
-  if (id !== AR_TAB.id) {
-    try { localStorage.setItem(TAB_STORE_KEY, id); } catch (_) { /* private mode */ }
-  }
   // Only the tab on screen holds a connection. An attached terminal sizes the
   // agent's pane to this window, and the chat polls every second or two.
   if (previous === 'claude' && id !== 'claude') disconnectTerminal();
@@ -1534,7 +1522,7 @@ async function selectTask(slug) {
   renderClaudeInfo(d.meta, d.claude || null, STATE.worktreeStatuses);
   applyAgentLabels(d.meta || {});
   buildTabs(d.meta);
-  // Keep the user on whatever panel optimistic-render showed (DEFAULT_TAB
+  // Keep the user on whatever panel optimistic-render showed (the Terminal
   // by default); calling showPanel again would re-trigger the deferred
   // refresh callbacks unnecessarily.
   if (!cached) {
