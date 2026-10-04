@@ -4,8 +4,11 @@ Three concerns after the agent-loop rewrite:
 
 1. **Task CRUD** - list / create / delete tasks (``<project>/.RUD/<slug>/``).
    Each new task auto-creates a git worktree at
-   ``<task>/work/<repo>`` on branch ``loom/<slug>`` (best-effort -
-   non-git project roots just skip the worktree step).
+   ``<task>/work/<repo>`` on branch ``loom/<slug>``, from the code root or
+   a repo picked from the project's candidates. New empty projects get
+   ``git init`` + a first commit so there is something to branch from; a
+   root that is still not a git repo skips the step, and the create
+   response carries a warning saying so.
 2. **Project notes** - one ``<project>/.RUD/NOTES.md`` per project,
    served by ``GET/PUT /api/notes``.
 3. **Claude pane** - launch a tmux + ``claude`` CLI in the task's
@@ -93,6 +96,7 @@ from loom.rud_task import (
     PLAN,
     SKILLS_PATH_SEP,
     SUPPORTED_AGENTS,
+    TaskChangeCounter,
     add_claude_session,
     agent_default_model,
     agent_label,
@@ -101,7 +105,9 @@ from loom.rud_task import (
     build_agent_command,
     create_task,
     delete_task,
+    describe_source_repo,
     detect_and_persist_worktree,
+    init_git_repo,
     join_skills_paths,
     list_session_files,
     list_task_markdown_files,
@@ -115,6 +121,7 @@ from loom.rud_task import (
     path_under_task,
     prepare_task_worktree_from,
     prefer_cursor_fast_model,
+    preview_task_paths,
     push_worktree_branch,
     read_meta,
     read_markdown_asset,
@@ -122,6 +129,7 @@ from loom.rud_task import (
     read_task_markdown_file,
     read_task_text,
     read_template,
+    repo_head_summary,
     rud_root,
     remove_task_worktree,
     reorder_tasks,
@@ -161,6 +169,46 @@ def _project_worktree_candidates(
     return list_worktree_candidates(
         root, [preferred] if preferred is not None else []
     )
+
+
+def _pick_source_repo(
+    raw: str, candidates: list[dict[str, Any]]
+) -> tuple[Path | None, dict[str, Any] | None]:
+    """Resolve a client-supplied ``source_repo`` against the project's candidates.
+
+    The whitelist is what stops a poisoned request from pointing
+    ``git worktree add`` (or a preview's ``git status``) at an arbitrary path
+    on disk, so every route that takes a repo path goes through here. Returns
+    the resolved path, or ``None`` and the body of a 400.
+    """
+    allowed = {str(Path(c["path"]).resolve()) for c in candidates}
+    try:
+        picked = Path(raw).expanduser().resolve()
+    except OSError as exc:
+        return None, {"ok": False, "error": f"invalid path: {exc}"}
+    if str(picked) not in allowed:
+        return None, {
+            "ok": False,
+            "error": "source_repo is not in the project's candidate list",
+            "allowed": sorted(allowed),
+        }
+    return picked, None
+
+
+def _worktree_warning(source: dict[str, Any], failure: str = "") -> str:
+    """The one sentence the UI shows when a task gets no worktree of its own.
+
+    *source* is a ``describe_source_repo`` result; *failure* is git's reason
+    when the repo looked fine and ``git worktree add`` refused anyway.
+    """
+    tail = "so this task has no isolated copy; its agent would edit the folder itself."
+    where = source.get("path") or "the code root"
+    if not source.get("is_git"):
+        return f"{where} is not a git repository, {tail}"
+    if not source.get("head"):
+        return f"{where} has no commits yet, {tail}"
+    reason = " ".join((failure or "git worktree add failed").split())[:300]
+    return f"Git could not make a worktree from {where} ({reason}), {tail}"
 
 
 # --- naming / filtering helpers --------------------------------------------
@@ -1243,6 +1291,9 @@ def make_handler(
         activity_watcher = AgentActivityWatcher(pr)
         activity_watcher.start()
     terminal_streams = _TerminalStreamRegistry()
+    # One per server: its per-worktree cache is what keeps the sidebar's
+    # every-30-seconds poll from re-running git status across every checkout.
+    change_counter = TaskChangeCounter()
 
     class Handler(BaseHTTPRequestHandler):
         protocol_version = "HTTP/1.1"
@@ -1561,6 +1612,69 @@ def make_handler(
                     self._bad_project()
                     return
                 st, b, h = _json_bytes({"tasks": [m.to_dict() for m in list_tasks(root)]})
+                self._send(st, b, h)
+                return
+
+            if path == "/api/task-preview":
+                # What "Create task" would do, shown before it does it: the
+                # slug and branch, where the worktree lands and which repo it
+                # comes from. Read-only - nothing is created, reserved or
+                # recorded, so the modal can call it on every title edit.
+                root, project_id = self._resolve_scope(parsed)
+                if root is None or project_id is None:
+                    self._bad_project()
+                    return
+                qs = parse_qs(parsed.query or "")
+                title = (qs.get("title") or [""])[0].strip()
+                raw_source = (qs.get("source_repo") or [""])[0].strip()
+                candidates = _project_worktree_candidates(pr, root, project_id)
+                code_root = pr.get_code_root(project_id) or root
+                source_path = code_root
+                if raw_source:
+                    picked, error = _pick_source_repo(raw_source, candidates)
+                    if picked is None:
+                        st, b, h = _json_bytes(error, 400)
+                        self._send(st, b, h)
+                        return
+                    source_path = picked
+                # git status on a big checkout is the slow part; overlap it
+                # with reading each candidate's branch and HEAD.
+                with ThreadPoolExecutor(max_workers=4) as pool:
+                    source_fut = pool.submit(describe_source_repo, source_path)
+                    rows = list(
+                        pool.map(
+                            lambda c: {**c, **repo_head_summary(Path(c["path"]))},
+                            candidates,
+                        )
+                    )
+                    source = source_fut.result()
+                makes_worktree = bool(source["is_git"] and source["head"])
+                payload: dict[str, Any] = {
+                    "ok": True,
+                    **preview_task_paths(
+                        root, title, source["name"] if makes_worktree else ""
+                    ),
+                    "code_root": str(code_root),
+                    "source": source,
+                    "candidates": rows,
+                }
+                if not makes_worktree:
+                    payload["worktree_warning"] = _worktree_warning(source)
+                st, b, h = _json_bytes(payload)
+                self._send(st, b, h)
+                return
+
+            if path == "/api/task-changes":
+                # Every sidebar row's change badge in one poll, instead of a
+                # diff per task. Cached and time-boxed per worktree (see
+                # TaskChangeCounter), so polling it stays cheap.
+                root, _pid = self._resolve_scope(parsed)
+                if root is None:
+                    self._bad_project()
+                    return
+                st, b, h = _json_bytes(
+                    {"ok": True, "tasks": change_counter.project_changes(root)}
+                )
                 self._send(st, b, h)
                 return
 
@@ -2206,6 +2320,19 @@ def make_handler(
                     )
                     self._send(st, b, h)
                     return
+                # The repo to branch from is checked before anything lands on
+                # disk, so a bad pick costs a 400 instead of a half-made task.
+                # A studio never gets a worktree, so it ignores the choice.
+                source_repo: Path | None = None
+                candidates: list[dict[str, Any]] | None = None
+                raw_source = str(body.get("source_repo") or "").strip()
+                if raw_source and ar_state is None:
+                    candidates = _project_worktree_candidates(pr, root, project_id)
+                    source_repo, error = _pick_source_repo(raw_source, candidates)
+                    if source_repo is None:
+                        st, b, h = _json_bytes(error, 400)
+                        self._send(st, b, h)
+                        return
                 meta = create_task(
                     root,
                     title,
@@ -2222,18 +2349,27 @@ def make_handler(
                 if ar_state is not None:
                     ar.write_ar_state(root, meta.slug, ar_state)
                 code_root = pr.get_code_root(project_id) or root
+                source = source_repo or code_root
                 if ar_state is not None:
                     # A studio only mines and spawns; it has no code of its own,
                     # so a worktree of the project would sit there unused.
                     wt, _branch, auto_msg = None, "", "AR studio: no worktree needed"
                 else:
                     wt, _branch, auto_msg = prepare_task_worktree_from(
-                        root, meta.slug, code_root
+                        root, meta.slug, source
                     )
+                    if wt is not None:
+                        # On the task right away, so this response and the
+                        # task-created event already name the worktree.
+                        detect_and_persist_worktree(root, meta.slug)
                 meta = read_meta(root, meta.slug) or meta
-                cands = _project_worktree_candidates(pr, root, project_id)
                 hint = ""
                 if not meta.worktree_path:
+                    cands = (
+                        candidates
+                        if candidates is not None
+                        else _project_worktree_candidates(pr, root, project_id)
+                    )
                     if not cands:
                         hint = (
                             f" (configured code root {code_root} is not a git repo)"
@@ -2262,7 +2398,17 @@ def make_handler(
                         "branch": meta.branch or "",
                     },
                 )
-                st, b, h = _json_bytes({"meta": meta.to_dict()}, 201)
+                created: dict[str, Any] = {
+                    "meta": meta.to_dict(),
+                    "worktree_created": wt is not None,
+                }
+                if wt is None and ar_state is None:
+                    # Say so plainly: without a worktree the agent works on
+                    # the real folder, which is exactly what tasks avoid.
+                    created["worktree_warning"] = _worktree_warning(
+                        describe_source_repo(source, with_status=False), auto_msg
+                    )
+                st, b, h = _json_bytes(created, 201)
                 self._send(st, b, h)
                 return
 
@@ -2351,10 +2497,26 @@ def make_handler(
                     st, b, h = _json_bytes({"error": err or "failed"}, 400)
                     self._send(st, b, h)
                     return
-                st, b, h = _json_bytes(
-                    {"id": new_id, "defaultProjectId": pr.default_project_id, "projects": pr.list_projects()},
-                    201,
-                )
+                registered: dict[str, Any] = {
+                    "id": new_id,
+                    "defaultProjectId": pr.default_project_id,
+                    "projects": pr.list_projects(),
+                }
+                if mode == "empty":
+                    # A fresh folder becomes a repo with a first commit, so its
+                    # tasks have a HEAD to branch their worktrees from. Done
+                    # after registering: a git problem costs the isolation,
+                    # never the project, and is reported rather than raised.
+                    git_ok, git_error = (
+                        init_git_repo(Path(raw_path))
+                        if bool(body.get("git_init", True))
+                        else (False, "")
+                    )
+                    registered["git_initialized"] = git_ok
+                    if git_error:
+                        registered["git_error"] = git_error
+                        print(f"[web] git init {raw_path} failed: {git_error}", flush=True)
+                st, b, h = _json_bytes(registered, 201)
                 self._send(st, b, h)
                 return
 
@@ -2860,32 +3022,17 @@ def make_handler(
                     st, b, h = _json_bytes({"error": "source_repo required"}, 400)
                     self._send(st, b, h)
                     return
-                # Whitelist against the project's candidate list so a
-                # poisoned request can't make us run `git worktree add`
-                # against an arbitrary path on disk.
-                allowed = {
-                    str(Path(c["path"]).resolve())
-                    for c in _project_worktree_candidates(pr, root, project_id)
-                }
-                try:
-                    src_resolved = str(Path(raw_src).expanduser().resolve())
-                except OSError as exc:
-                    st, b, h = _json_bytes({"error": f"invalid path: {exc}"}, 400)
-                    self._send(st, b, h)
-                    return
-                if src_resolved not in allowed:
-                    st, b, h = _json_bytes(
-                        {
-                            "error": "source_repo is not in the project's candidate list",
-                            "allowed": sorted(allowed),
-                        },
-                        400,
-                    )
-                    self._send(st, b, h)
-                    return
-                wt, branch, msg = prepare_task_worktree_from(
-                    root, slug, Path(src_resolved)
+                # Only a repo from the project's candidate list - see
+                # _pick_source_repo.
+                picked, error = _pick_source_repo(
+                    raw_src, _project_worktree_candidates(pr, root, project_id)
                 )
+                if picked is None:
+                    st, b, h = _json_bytes(error, 400)
+                    self._send(st, b, h)
+                    return
+                src_resolved = str(picked)
+                wt, branch, msg = prepare_task_worktree_from(root, slug, picked)
                 print(
                     f"[web] manual worktree slug={slug} src={src_resolved} "
                     f"ok={wt is not None} msg={msg}",

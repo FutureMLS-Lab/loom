@@ -146,6 +146,10 @@
             <p class="overview__label">In focus</p>
             <div class="focus-list" id="overview-focus"></div>
           </div>
+          <div class="overview__parallel" id="overview-parallel">
+            <svg class="ico" aria-hidden="true"><use href="#i-branch"/></svg>
+            <p><strong>Run as many tasks as you like.</strong> Each one gets its own copy of the repository — a git worktree on its own <code>loom/</code> branch — and its own terminal, so agents never edit each other’s files and your checkout stays as it is until you <em>Merge ↩</em>.</p>
+          </div>
           <div class="overview__foot">
             <span><svg class="ico ico--sm" aria-hidden="true"><use href="#i-chat"/></svg>Chat &amp; steer</span>
             <span><svg class="ico ico--sm" aria-hidden="true"><use href="#i-terminal"/></svg>Watch the terminal</span>
@@ -503,6 +507,7 @@
         <p class="skills-note">Injected into the deep interview and worker prompt. Pick as many as you need — they're combined.</p>
         <label for="new-title">Title</label>
         <input type="text" id="new-title" placeholder="Example: xorl1" />
+        <div class="create-preview" id="create-preview" aria-live="polite" hidden></div>
         <label for="new-agent-select">Task type</label>
         <select id="new-agent-select" class="modal-input-wide" aria-label="Task type">
           <option value="cursor">Cursor Agent — agent CLI, resume by chat ID</option>
@@ -590,6 +595,10 @@
           <label for="new-project-repo">Git repo URL</label>
           <input type="text" id="new-project-repo" class="modal-input-wide" placeholder="https://github.com/owner/repo.git" spellcheck="false" autocapitalize="off" />
         </div>
+        <label class="add-project-git" id="add-project-git-row" hidden>
+          <input type="checkbox" id="new-project-git-init" checked />
+          <span><strong>Make it a git repository</strong> — <code>git init</code> and a first commit, so every task gets its own worktree and branch instead of editing the folder itself.</span>
+        </label>
         <label id="new-project-path-label" for="new-project-path">Project directory</label>
         <input type="text" id="new-project-path" class="modal-input-wide" placeholder="/home/you/MyRepo" spellcheck="false" />
         <p class="modal-subhint" id="add-project-path-hint"></p>

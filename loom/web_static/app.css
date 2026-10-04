@@ -2685,6 +2685,7 @@ body.sidebar-hidden .sidebar { display: none; }
 .task-list .task-row:hover { background: rgba(31, 35, 48, 0.06); }
 .task-row__agent { flex: 0 0 auto; display: inline-flex; padding-top: 2px; color: var(--text-faint); }
 .task-row__agent .ico { width: 14px; height: 14px; }
+.task-row__body { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 2px; }
 .task-row__title {
   flex: 1; min-width: 0; font-size: 0.84rem; line-height: 1.38; color: #2c3140;
   display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; overflow-wrap: anywhere;
@@ -2701,7 +2702,7 @@ body.sidebar-hidden .sidebar { display: none; }
 /* ---- overview ---- */
 .overview { flex: 1; min-height: 0; overflow-y: auto; }
 .overview__inner { max-width: 740px; margin: 0 auto; padding: 36px 36px 48px; display: flex; flex-direction: column; gap: 26px; }
-.overview__hero { display: flex; align-items: flex-start; justify-content: space-between; gap: 20px; }
+.overview__hero { display: flex; align-items: flex-start; justify-content: space-between; gap: 20px; order: -2; }
 .overview__eyebrow { margin: 0 0 8px; font-size: 0.66rem; font-weight: 650; letter-spacing: 0.2em; text-transform: uppercase; color: var(--accent); }
 .overview__title { margin: 0 0 8px; font-size: 1.9rem; font-weight: 650; letter-spacing: -0.04em; line-height: 1.15; }
 .overview__sub { margin: 0; color: var(--text-dim); font-size: 0.88rem; }
@@ -3105,3 +3106,63 @@ body.is-resizing { cursor: col-resize; user-select: none; }
   .flow-actions { display: none; }
   .files__tree { display: none; }
 }
+
+/* ---- parallel tasks, made visible ---- */
+.task-row__meta {
+  display: flex; align-items: center; gap: 7px; min-width: 0;
+  font-size: 0.68rem; color: var(--text-faint); font-variant-numeric: tabular-nums;
+}
+.task-row__branch {
+  display: inline-flex; align-items: center; gap: 3px; min-width: 0;
+  font-family: var(--font-mono); font-size: 0.66rem; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+.task-row__branch .ico { flex: 0 0 auto; }
+.task-row__stat { display: inline-flex; gap: 4px; flex: 0 0 auto; font-weight: 600; }
+.task-row__stat .is-add { color: #15803d; }
+.task-row__stat .is-del { color: #b91c1c; }
+.task-row__dirty { color: var(--amber); font-size: 0.6rem; flex: 0 0 auto; }
+.task-list .task-row.active .task-row__meta,
+.task-list .task-row.active .task-row__stat .is-add,
+.task-list .task-row.active .task-row__stat .is-del,
+.task-list .task-row.active .task-row__dirty { color: rgba(255, 255, 255, 0.82); }
+
+.create-preview {
+  margin: 8px 0 4px; padding: 10px 12px; border-radius: 10px; font-size: 0.8rem; line-height: 1.5;
+  background: rgba(79, 70, 229, 0.05); border: 1px solid rgba(79, 70, 229, 0.18); color: var(--text-dim);
+}
+.create-preview p { margin: 0; }
+.create-preview p + p, .create-preview p + label { margin-top: 6px; }
+.create-preview code { font-size: 0.74rem; }
+.create-preview__line { display: flex; gap: 7px; align-items: flex-start; }
+.create-preview__line .ico { color: var(--accent); margin-top: 3px; }
+.create-preview__warn { color: #92400e; }
+.create-preview__warn--strong { display: flex; gap: 7px; align-items: flex-start; color: #9a3412; }
+.create-preview__warn--strong .ico { margin-top: 3px; }
+.create-preview__repo { display: flex; align-items: center; gap: 8px; font-weight: 600; color: var(--text); }
+#create-modal .create-preview__repo select { flex: 1; margin: 0; min-width: 0; }
+
+.overview__parallel {
+  display: flex; align-items: flex-start; gap: 10px; padding: 12px 14px; border-radius: 10px;
+  border: 1px dashed var(--border-strong); color: var(--text-dim); font-size: 0.8rem; line-height: 1.55;
+}
+.overview__parallel p { margin: 0; }
+.overview__parallel .ico { color: var(--accent); margin-top: 2px; }
+.overview__parallel strong { color: var(--text); }
+.overview__parallel.is-first-run {
+  order: -1; border-style: solid; border-color: rgba(79, 70, 229, 0.25); background: rgba(79, 70, 229, 0.05);
+  font-size: 0.88rem;
+}
+
+.add-project-git {
+  display: flex; align-items: flex-start; gap: 9px; margin: 12px 0 4px; padding: 10px 12px; border-radius: 10px;
+  background: rgba(34, 197, 94, 0.06); border: 1px solid rgba(34, 197, 94, 0.25); font-size: 0.82rem; color: var(--text-dim);
+  text-transform: none; letter-spacing: normal; font-weight: 400; cursor: pointer;
+}
+.add-project-git input { margin-top: 3px; }
+.add-project-git strong { color: var(--text); }
+
+.toast__action {
+  margin-left: 10px; padding: 3px 10px; border-radius: 999px; border: 1px solid currentColor;
+  background: transparent; color: inherit; font: inherit; font-size: 0.8rem; font-weight: 650; cursor: pointer;
+}
+.wt-picker__merge, .wt-picker__push { white-space: nowrap; flex: 0 0 auto; }

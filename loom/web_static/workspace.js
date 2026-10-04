@@ -28,7 +28,17 @@ const WS = {
   filterSig: '',
   dockSig: '',
   refreshTimer: null,
+  // Per project: what each task's branch has changed (files, +/− lines).
+  changes: {},
+  changesAt: {},
+  preview: { seq: 0, data: null, timer: 0 },
 };
+
+// How often the sidebar's +/− counts are re-read for an open project. The
+// server caches per worktree; this only bounds how stale a count can look.
+const WS_CHANGES_MS = 30000;
+const WS_TASK_CHANGES_PATH = '/api/task-changes';
+const WS_TASK_PREVIEW_PATH = '/api/task-preview';
 
 const WS_KEYS = {
   expanded: 'loom.sidebar.expanded',
@@ -134,6 +144,7 @@ async function wsLoadAllTasks() {
   await Promise.all(workers);
   if (STATE.projectId) STATE.tasks = STATE.tasksByProject[STATE.projectId] || [];
   renderProjectTree();
+  wsLoadVisibleChanges();
 }
 
 async function wsReloadProjectTasks(pid) {
@@ -359,7 +370,10 @@ function wsProjectSection(p, tasks, total, filtering) {
     if (WS.justDragged) return;
     if (filtering) return;
     if (WS.expanded.has(p.id)) WS.expanded.delete(p.id);
-    else WS.expanded.add(p.id);
+    else {
+      WS.expanded.add(p.id);
+      wsLoadChanges(p.id);
+    }
     wsWrite(WS_KEYS.expanded, [...WS.expanded]);
     renderProjectTree();
   });
@@ -411,7 +425,8 @@ function wsTaskRow(pid, t) {
   // would push the rest of the project off the screen.
   li.innerHTML =
     `<span class="task-row__agent" title="${escapeHtml(wsAgentName(t))}">${wsIcon(wsAgentIcon(t), 'ico')}</span>`
-    + `<span class="task-row__title">${escapeHtml(t.title || t.slug)}</span>`;
+    + `<span class="task-row__body"><span class="task-row__title">${escapeHtml(t.title || t.slug)}</span>`
+    + `${wsRowMetaHtml(pid, t)}</span>`;
   li.addEventListener('click', () => {
     if (WS.justDragged) return;
     if (pid === STATE.projectId && t.slug === STATE.slug) return;
@@ -429,6 +444,87 @@ function wsTaskRow(pid, t) {
   });
   wsBindTaskDrag(li, pid, t.slug);
   return li;
+}
+
+// The task's own branch and how much it has changed: the parallel story,
+// visible row by row. Tasks without a worktree say nothing here.
+function wsRowMetaHtml(pid, t) {
+  const branch = t.branch || (Array.isArray(t.branches) && t.branches.find(Boolean)) || '';
+  const info = (WS.changes[pid] || {})[t.slug];
+  if (!branch && !(info && info.worktrees)) return '';
+  const bits = [];
+  if (branch) {
+    const more = info && info.worktrees > 1 ? ` +${info.worktrees - 1}` : '';
+    bits.push(`<span class="task-row__branch">${wsIcon('branch', 'ico ico--xs')}${escapeHtml(branch)}${more}</span>`);
+  }
+  if (info && (info.insertions || info.deletions)) {
+    bits.push(`<span class="task-row__stat"><span class="is-add">+${info.insertions || 0}</span>`
+      + `<span class="is-del">−${info.deletions || 0}</span></span>`);
+  }
+  if (info && info.uncommitted) {
+    bits.push(`<span class="task-row__dirty" title="${info.uncommitted} file${info.uncommitted === 1 ? '' : 's'} not committed yet">●</span>`);
+  }
+  const files = info && info.files ? `${info.files} file${info.files === 1 ? '' : 's'} changed on ${branch}` : branch;
+  return `<span class="task-row__meta" title="${escapeHtml(files)}">${bits.join('')}</span>`;
+}
+
+async function wsLoadChanges(pid, force = false) {
+  if (!pid || (STATE.serverReachable === false)) return;
+  const now = Date.now();
+  if (!force && WS.changesAt[pid] && now - WS.changesAt[pid] < WS_CHANGES_MS - 1000) return;
+  WS.changesAt[pid] = now;
+  try {
+    const d = await apiNoProject(`${WS_TASK_CHANGES_PATH}?project=${encodeURIComponent(pid)}`);
+    const next = (d && d.tasks) || {};
+    if (JSON.stringify(next) === JSON.stringify(WS.changes[pid] || {})) return;
+    WS.changes[pid] = next;
+    wsUpdateRowMeta(pid);
+  } catch (_) {
+    // An older server has no counts; rows keep their branch only.
+  }
+}
+
+// Swaps the second line in place: re-rendering the tree would restart the rings.
+function wsUpdateRowMeta(pid) {
+  for (const li of document.querySelectorAll(`#project-tree li.task-row[data-project="${CSS.escape(pid)}"]`)) {
+    const t = (STATE.tasksByProject[pid] || []).find((x) => x.slug === li.dataset.slug);
+    const body = li.querySelector('.task-row__body');
+    if (!t || !body) continue;
+    const old = body.querySelector('.task-row__meta');
+    const html = wsRowMetaHtml(pid, t);
+    if (old) old.remove();
+    if (html) body.insertAdjacentHTML('beforeend', html);
+  }
+}
+
+function wsLoadVisibleChanges(force = false) {
+  const open = new Set([...WS.expanded]);
+  if (STATE.projectId) open.add(STATE.projectId);
+  const filtering = (STATE.taskFilter || '').trim() || WS.stateFilter !== 'all';
+  for (const p of STATE.projects || []) {
+    if (open.has(p.id) || filtering) wsLoadChanges(p.id, force);
+  }
+}
+
+async function wsProjectAdded(pid) {
+  if (!pid) return;
+  WS.expanded.add(pid);
+  wsWrite(WS_KEYS.expanded, [...WS.expanded]);
+  await wsReloadProjectTasks(pid);
+  const section = document.querySelector(`#project-tree .tree-project[data-project-id="${CSS.escape(pid)}"]`);
+  if (section) section.scrollIntoView({ block: 'nearest' });
+}
+
+// After the first task in a project: say out loud that a second one is fine.
+function wsNudgeParallel(pid, meta) {
+  const list = STATE.tasksByProject[pid] || [];
+  if (!meta || list.length !== 1 || isArKind(meta.kind)) return;
+  const branch = meta.branch ? ` on ${meta.branch}` : '';
+  toast(`Created in its own worktree${branch} — your checkout is untouched. Start another task any time: they run side by side.`, {
+    type: 'success',
+    ttl: 9000,
+    action: { label: 'New task', onClick: () => openCreateModal(pid) },
+  });
 }
 
 function wsSyncSelection(scroll) {
@@ -641,6 +737,8 @@ function renderOverview() {
   setText('btn-empty-create-label', projects.length ? 'New task' : 'Add project');
   const open = document.getElementById('btn-overview-open');
   if (open) open.disabled = !count;
+  const explain = document.getElementById('overview-parallel');
+  if (explain) explain.classList.toggle('is-first-run', !count);
   const host = document.getElementById('overview-focus');
   if (!host) return;
   const sig = JSON.stringify(attention.slice(0, 8).map((a) => [a.pid, a.meta.slug, a.state, a.meta.title]));
@@ -1329,6 +1427,141 @@ function wsInit() {
   // Titles, new tasks and other clients' changes arrive on a slower cycle
   // than the activity rings.
   WS.refreshTimer = setInterval(() => {
-    if (!document.hidden && STATE.serverReachable !== false) wsLoadAllTasks().catch(() => {});
-  }, 30000);
+    if (document.hidden || STATE.serverReachable === false) return;
+    wsLoadAllTasks().catch(() => {});
+    wsLoadVisibleChanges();
+  }, WS_CHANGES_MS);
+  wsInitCreatePreview();
+}
+
+// ===== Create Task: where the task will branch from =====
+//
+// Before anything is created the dialog says which repository and commit the
+// task will start from and where its worktree will live, warns when the
+// checkout has edits that will not come along, offers the repositories when
+// the project holds several, and says plainly when there is no repository to
+// isolate the task in at all.
+
+function wsCreatePreviewBox() {
+  return document.getElementById('create-preview');
+}
+
+function wsScheduleCreatePreview(delay = 250) {
+  clearTimeout(WS.preview.timer);
+  WS.preview.timer = setTimeout(wsLoadCreatePreview, delay);
+}
+
+async function wsLoadCreatePreview() {
+  const box = wsCreatePreviewBox();
+  const modal = document.getElementById('create-modal');
+  if (!box || !modal || modal.hidden) return;
+  if (document.getElementById('new-agent-select')?.value === 'ar') {
+    // A research studio only mines and spawns; it gets no worktree.
+    box.hidden = true;
+    return;
+  }
+  const pid = STATE.createProjectId || STATE.projectId;
+  const title = (document.getElementById('new-title')?.value || '').trim();
+  const picker = document.getElementById('create-repo-select');
+  const repo = picker && !picker.hidden ? picker.value : (STATE.createSourceRepo || '');
+  const params = new URLSearchParams({ project: pid || '', title: title || 'title' });
+  if (repo) params.set('source_repo', repo);
+  const seq = ++WS.preview.seq;
+  try {
+    const d = await apiNoProject(`${WS_TASK_PREVIEW_PATH}?${params.toString()}`);
+    if (seq !== WS.preview.seq) return;
+    WS.preview.data = d;
+    wsRenderCreatePreview(d, title);
+  } catch (_) {
+    if (seq === WS.preview.seq) box.hidden = true;
+  }
+}
+
+function wsShortPath(path) {
+  return String(path || '').replace(/^\/home\/[^/]+/, '~');
+}
+
+function wsRenderCreatePreview(d, title) {
+  const box = wsCreatePreviewBox();
+  if (!box) return;
+  const src = d.source || null;
+  const candidates = Array.isArray(d.candidates) ? d.candidates : [];
+  const project = wsProject(STATE.createProjectId || STATE.projectId);
+  const root = project ? project.path : '';
+  const rel = (p) => {
+    const full = String(p || '');
+    return root && full.startsWith(`${root}/`) ? full.slice(root.length + 1) : wsShortPath(full);
+  };
+  let html = '';
+  if (d.worktree_warning) {
+    // Not a repository, a repository with no commit yet, or git refused:
+    // the server says which, in the words the create response would use.
+    html += `<p class="create-preview__warn create-preview__warn--strong">${wsIcon('branch', 'ico ico--sm')}`
+      + `<span>${escapeHtml(d.worktree_warning)} `
+      + (candidates.length ? 'Pick a repository below, or make this folder one (git init and a first commit).'
+        : 'Make it one first (git init and a first commit), or point the project’s code root at a repository.')
+      + `</span></p>`;
+  } else if (src && src.is_git) {
+    // The slug is only known once there is a title; until then the branch
+    // prefix (loom/ unless LOOM_BRANCH_PREFIX says otherwise) is shown with
+    // a placeholder, worked out from the answer for a stand-in title.
+    const prefix = String(d.branch || '').slice(0, Math.max(0, String(d.branch || '').length - String(d.slug || '').length));
+    const at = src.branch ? `${escapeHtml(src.name)}@${escapeHtml(src.branch)}` : escapeHtml(src.name);
+    const sha = src.head_short ? ` (<code>${escapeHtml(src.head_short)}</code>)` : '';
+    const branch = title ? escapeHtml(d.branch) : `${escapeHtml(prefix)}&lt;title&gt;`;
+    const dest = title ? escapeHtml(rel(d.worktree_dest)) : `.RUD/&lt;title&gt;/work/${escapeHtml(src.name)}`;
+    html += `<p class="create-preview__line">${wsIcon('branch', 'ico ico--sm')}`
+      + `<span>New branch <code>${branch}</code> from <code>${at}</code>${sha}, checked out at <code>${dest}</code>.`
+      + ` Your checkout is not touched.</span></p>`;
+    const dirty = Number(src.dirty || 0);
+    const untracked = Number(src.untracked || 0);
+    if (dirty > 0 || untracked > 0) {
+      const parts = [];
+      if (dirty) parts.push(`${dirty} uncommitted change${dirty === 1 ? '' : 's'}`);
+      if (untracked) parts.push(`${untracked} untracked file${untracked === 1 ? '' : 's'}`);
+      html += `<p class="create-preview__warn">${parts.join(' and ')} in ${escapeHtml(src.name)} `
+        + `stay behind: the task starts from the last commit. Commit first if it needs them.</p>`;
+    }
+  }
+  if (candidates.length > 1 || (candidates.length === 1 && d.worktree_warning)) {
+    const current = src && src.is_git && !d.worktree_warning ? src.path : '';
+    html += `<label class="create-preview__repo">Repository <select id="create-repo-select">`
+      + (current ? '' : '<option value="">Choose a repository…</option>')
+      + candidates.map((c) => {
+        const label = `${c.name}${c.branch ? ` @ ${c.branch}` : ''}${c.head_short ? ` (${c.head_short})` : ''}`;
+        return `<option value="${escapeHtml(c.path)}"${c.path === current ? ' selected' : ''}>${escapeHtml(label)}</option>`;
+      }).join('')
+      + `</select></label>`;
+  }
+  box.innerHTML = html;
+  box.hidden = !html;
+  const picker = document.getElementById('create-repo-select');
+  if (picker) {
+    picker.addEventListener('change', () => {
+      STATE.createSourceRepo = picker.value;
+      wsScheduleCreatePreview(0);
+    });
+  }
+}
+
+function wsInitCreatePreview() {
+  const title = document.getElementById('new-title');
+  const project = document.getElementById('new-project-select');
+  const agent = document.getElementById('new-agent-select');
+  if (title) title.addEventListener('input', () => wsScheduleCreatePreview());
+  if (project) project.addEventListener('change', () => {
+    STATE.createSourceRepo = '';
+    wsScheduleCreatePreview(0);
+  });
+  if (agent) agent.addEventListener('change', () => wsScheduleCreatePreview(0));
+  const modal = document.getElementById('create-modal');
+  if (modal && typeof MutationObserver === 'function') {
+    // Opening the dialog (from any of its five doors) refreshes the preview.
+    new MutationObserver(() => {
+      if (!modal.hidden) {
+        STATE.createSourceRepo = '';
+        wsScheduleCreatePreview(0);
+      }
+    }).observe(modal, { attributes: true, attributeFilter: ['hidden'] });
+  }
 }

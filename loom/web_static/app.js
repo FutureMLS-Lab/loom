@@ -79,6 +79,17 @@ function toast(message, opts = {}) {
   el.className = 'toast' + (opts.type === 'error' ? ' toast--error' : opts.type === 'success' ? ' toast--success' : '');
   el.setAttribute('role', opts.type === 'error' ? 'alert' : 'status');
   el.textContent = String(message);
+  if (opts.action && opts.action.label) {
+    const act = document.createElement('button');
+    act.type = 'button';
+    act.className = 'toast__action';
+    act.textContent = opts.action.label;
+    act.addEventListener('click', () => {
+      el.remove();
+      opts.action.onClick();
+    });
+    el.appendChild(act);
+  }
   host.appendChild(el);
   requestAnimationFrame(() => el.classList.add('is-show'));
   const ttl = opts.ttl || (opts.type === 'error' ? 6000 : 3500);
@@ -363,7 +374,10 @@ async function loadProjectsList() {
   STATE.launchRoot = String(d.launchRoot || '').trim();
   STATE.launchRootChildren = Array.isArray(d.launchRootChildren) ? d.launchRootChildren : [];
   const cur = String(d.currentProjectId || d.defaultProjectId || '').trim();
-  if (cur && STATE.projects.some((p) => p.id === cur)) {
+  if (STATE.slug && STATE.projects.some((p) => p.id === STATE.projectId)) {
+    // The open task's project stays the context, whatever another client
+    // made current on the server since.
+  } else if (cur && STATE.projects.some((p) => p.id === cur)) {
     STATE.projectId = cur;
   } else {
     STATE.projectId = STATE.projects.length ? STATE.projects[0].id : null;
@@ -457,6 +471,8 @@ function setAddProjectMode(mode) {
   const root = (STATE.launchRoot || '').trim();
   const prefix = root ? root.replace(/\/+$/, '') + '/' : '';
   if (repoRow) repoRow.hidden = mode !== 'clone';
+  const gitRow = document.getElementById('add-project-git-row');
+  if (gitRow) gitRow.hidden = mode !== 'empty';
   if (mode === 'empty') {
     if (label) label.textContent = 'New folder path';
     if (pathInput) pathInput.placeholder = prefix ? prefix + 'my-new-project' : '/path/inside/launch-dir';
@@ -537,16 +553,22 @@ async function submitAddProject() {
     ? 'Cloning… (large repos can take a while)'
     : (mode === 'empty' ? 'Creating…' : 'Adding…');
   try {
+    const body = { path, mode, repo_url, code_root_pattern };
+    // Tasks get worktrees only from a repository with a commit, so a new
+    // folder starts as one unless the user says otherwise.
+    if (mode === 'empty') body.git_init = !!document.getElementById('new-project-git-init')?.checked;
     const created = await apiNoProject('/api/projects', {
       method: 'POST',
-      body: JSON.stringify({ path, mode, repo_url, code_root_pattern }),
+      body: JSON.stringify(body),
     });
-    if (created.id) STATE.projectId = created.id;
-    else if (created.defaultProjectId) STATE.projectId = created.defaultProjectId;
+    const newId = created.id || '';
+    if (!STATE.slug && newId) STATE.projectId = newId;
     closeAddProjectModal();
+    if (created.git_error) toast(`Added, but git init failed: ${created.git_error}`, { type: 'error' });
     await loadProjectsList();
-    await loadProject();
-    await loadTasks();
+    if (!STATE.slug) await loadProject();
+    if (typeof wsProjectAdded === 'function') await wsProjectAdded(newId);
+    else await loadTasks();
   } catch (e) {
     status.textContent = e.message;
   } finally {
@@ -1469,8 +1491,7 @@ async function selectTask(slug) {
     STATE.previewCache = {};
     applyAgentLabels(cached);
     buildTabs(cached);
-    if (isArKind(cached.kind)) showPanel('ar');
-    else showPanel(DEFAULT_TAB);
+    showPanel(defaultTabFor(cached));
   }
 
   let d;
@@ -1517,8 +1538,8 @@ async function selectTask(slug) {
   // by default); calling showPanel again would re-trigger the deferred
   // refresh callbacks unnecessarily.
   if (!cached) {
-    if (isArKind(d.meta.kind)) { showPanel('ar'); initArLab(d.meta); }
-    else showPanel(DEFAULT_TAB);
+    showPanel(defaultTabFor(d.meta));
+    if (isArKind(d.meta.kind)) initArLab(d.meta);
   } else if (isArKind(d.meta.kind)) {
     initArLab(d.meta);
   }
@@ -3141,6 +3162,7 @@ document.querySelectorAll('input[name="ar-mode"]').forEach((el) => {
 });
 
 function resetCreateForm() {
+  STATE.createSourceRepo = '';
   $('#new-title').value = '';
   $('#new-goal').value = '';
   $('#new-task-status').textContent = '';
@@ -4089,6 +4111,15 @@ function renderWorktreeListInto(wtHost, pushAllBtn, meta, statuses, primaryLabel
   push.addEventListener('click', () => pushWorktree(sel.value, push));
   row.appendChild(push);
 
+  const merge = document.createElement('button');
+  merge.type = 'button';
+  merge.className = 'btn btn--sm wt-picker__merge';
+  merge.textContent = 'Merge ↩';
+  merge.title = 'git merge --no-ff <branch> into the checkout it came from. '
+    + 'Refuses while that checkout has uncommitted changes, aborts on conflicts, never pushes.';
+  merge.addEventListener('click', () => mergeWorktree(sel.value, merge));
+  row.appendChild(merge);
+
   const rm = document.createElement('button');
   rm.type = 'button';
   rm.className = 'wt-list-row__remove';
@@ -4326,6 +4357,38 @@ async function pushWorktree(path, btn) {
     btn.textContent = original;
     btn.disabled = false;
     toast(err.message || 'push failed', { type: 'error' });
+  }
+}
+
+// Brings a task's branch into the checkout it came from. The server refuses a
+// dirty checkout and aborts a conflicting merge - leaving the checkout as it
+// was - so all this has to do is say which happened.
+async function mergeWorktree(path, btn) {
+  if (!STATE.slug || !path) return;
+  const st = (STATE.worktreeStatuses || []).find((x) => x && x.path === path) || {};
+  const branch = st.branch || 'this branch';
+  if (!confirm(`Merge ${branch} into the checkout it came from?\n\n`
+      + 'Only committed work is merged. Nothing is pushed; the merge stays local.')) return;
+  const original = btn.textContent;
+  btn.disabled = true;
+  btn.textContent = 'Merging…';
+  try {
+    const r = await api(
+      `/api/tasks/${encodeURIComponent(STATE.slug)}/worktree/merge`,
+      { method: 'POST', body: JSON.stringify({ path }) },
+    );
+    toast(`Merged ${r.branch || branch} into ${r.base || 'its base'}. Nothing was pushed.`, { type: 'success', ttl: 6000 });
+    refreshChangesView(true);
+  } catch (err) {
+    const body = (err && err.body) || {};
+    const files = Array.isArray(body.conflicts) && body.conflicts.length
+      ? ` Conflicting: ${body.conflicts.slice(0, 6).join(', ')}${body.conflicts.length > 6 ? ', …' : ''}.`
+      : '';
+    const message = String((err && err.message) || 'merge failed').trim().replace(/([^.!?])$/, '$1.');
+    toast(`${message}${files}`, { type: 'error', ttl: 12000 });
+  } finally {
+    btn.textContent = original;
+    btn.disabled = false;
   }
 }
 
@@ -4593,17 +4656,21 @@ document.getElementById('btn-new-task').addEventListener('click', async () => {
       delete body.general_goal;
     }
     if (skills_path) body.skills_path = skills_path;
+    if (agent !== 'ar' && STATE.createSourceRepo) body.source_repo = STATE.createSourceRepo;
     const pid = STATE.createProjectId || STATE.projectId;
-    const { meta } = await apiNoProject(`/api/tasks?project=${encodeURIComponent(pid)}`, {
+    const created = await apiNoProject(`/api/tasks?project=${encodeURIComponent(pid)}`, {
       method: 'POST',
       body: JSON.stringify(body),
     });
+    const meta = created.meta;
     STATE.createProjectId = null;  // the new task's project becomes the open one
     resetCreateForm();
     closeCreateModal();
     if (typeof wsReloadProjectTasks === 'function') await wsReloadProjectTasks(pid);
     if (typeof openTask === 'function') await openTask(pid, meta.slug);
     else await selectTask(meta.slug);
+    if (created.worktree_warning) toast(created.worktree_warning, { type: 'error', ttl: 12000 });
+    else if (typeof wsNudgeParallel === 'function') wsNudgeParallel(pid, meta);
   } catch (e) {
     status.textContent = e.message;
   } finally {

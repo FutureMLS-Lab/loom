@@ -29,19 +29,32 @@ the web console, loom-desktop, loom-app, OpenClaw agents, and your scripts.
 |--------|-----|---------|
 | `GET` | `/api/project` | Active project root, skills path, skills options |
 | `GET` | `/api/projects` | Registered projects, default, launch root |
-| `POST` | `/api/projects` `{path}` | Register a project root |
+| `POST` | `/api/projects` `{path, mode?, repo_url?, code_root_pattern?, git_init?}` | Register a project root (see below) |
 | `POST` | `/api/projects/<id>/activate` | Set the default project |
 | `POST` | `/api/projects/<id>/code-root` `{pattern}` | Where task worktrees are based |
 | `POST` | `/api/projects/reorder` `{ids}` | Persist chip order |
 | `DELETE` | `/api/projects/<id>` | Drop from registry (files untouched) |
 | `GET` / `PUT` | `/api/notes` | Read / save the project's `NOTES.md` |
 
+`mode` is `existing` (the default: register a folder as it is), `empty`
+(create the folder) or `clone` (`git clone` `repo_url` into it); the last two
+must stay inside the launch directory. An `empty` folder also becomes a git
+repository with one empty commit, "Initial commit", so its tasks have a HEAD
+to branch their worktrees from — unless `git_init: false`, or the folder is
+already inside a git work tree. With no git identity configured, that commit
+is signed `<os user> <<os user>@<hostname>>` for that one command; no git
+config is written. `.RUD/` goes into the new repo's `.git/info/exclude`.
+`201` → `{id, defaultProjectId, projects}`, and for `empty` also
+`git_initialized` (bool) plus `git_error` when git failed. A git failure never
+blocks registration: the project is registered either way.
+
 ## Tasks
 
 | Method | URL | Purpose |
 |--------|-----|---------|
 | `GET` | `/api/tasks` | All tasks for the active project |
-| `POST` | `/api/tasks` `{title, general_goal, agent?, kind?}` | Create a task (auto-worktree when the root is a git repo) |
+| `POST` | `/api/tasks` `{title, general_goal, agent?, kind?, source_repo?}` | Create a task in its own worktree (see [Worktrees](#worktrees)) |
+| `GET` | `/api/task-preview?title=&source_repo=` | What creating that task would do — read-only |
 | `GET` | `/api/tasks/<slug>` | Meta + PLAN.md + markdown files + agent summary + worktree statuses |
 | `PUT` | `/api/tasks/<slug>/meta` `{title?, general_goal?, agent?, skills_path?}` | Rename / re-goal / switch agent |
 | `PUT` | `/api/tasks/<slug>/template` `{name, content}` | Write PLAN.md (or another task markdown) |
@@ -49,6 +62,7 @@ the web console, loom-desktop, loom-app, OpenClaw agents, and your scripts.
 | `POST` | `/api/tasks/reorder` `{slugs}` | Persist sidebar order |
 | `DELETE` | `/api/tasks/<slug>` | Delete the task tree (unregisters its worktrees) |
 | `GET` | `/api/tasks/<slug>/diff` | Changes tab: uncommitted + committed diff per worktree |
+| `GET` | `/api/task-changes` | Change counts for every task's sidebar row, in one poll |
 | `POST` | `/api/tasks/<slug>/review` `{path, rules?}` | AI review of the diff vs rules / skills |
 | `GET`/`POST`/`DELETE` | `/api/tasks/<slug>/monitor` | Run-monitor status / enable / disable |
 
@@ -76,6 +90,84 @@ old clients.
 | `POST` | `/api/tasks/<slug>/worktree/push` `{path}` | `git push -u origin <branch>` |
 | `POST` | `/api/tasks/<slug>/worktree/merge` `{path}` | Merge into the base branch (never pushes) |
 | `POST` | `/api/tasks/<slug>/worktrees/push-all` | Push every task worktree |
+
+**Create.** Every agent task gets `work/<repo>` on branch `loom/<slug>`,
+branched from the HEAD of the project's code root — or of `source_repo`, which
+must be one of the project's worktree candidates (else `400` with `allowed`,
+before anything is created). Paper Factory (AR) tasks get no worktree and
+ignore `source_repo`. The fork commit is recorded in `meta.worktree_bases`.
+When the project's `.RUD/` lies inside the source repo (project root == repo
+root, typically), an anchored entry for it goes into that repo's
+`.git/info/exclude`, so the user's own `git status` stays clean;
+`.gitignore` is never edited.
+`201` → `{meta, worktree_created, worktree_warning?}`: `meta.worktrees`
+already lists the new worktree, and `worktree_warning` — one plain sentence —
+appears only when an agent task got none (the source is not a git repository,
+has no commits yet, or git refused), because its agent would then edit the
+folder itself.
+
+**Preview.** `GET /api/task-preview?project=<id>&title=<title>[&source_repo=<path>]`
+→
+
+```json
+{
+  "ok": true,
+  "slug": "fix-the-bug",
+  "branch": "loom/fix-the-bug",
+  "task_dir": "<project>/.RUD/fix-the-bug",
+  "worktree_dest": "<project>/.RUD/fix-the-bug/work/<repo>",
+  "code_root": "<code root>",
+  "source": {"path": "<repo>", "name": "<repo name>", "is_git": true,
+             "branch": "main", "head": "<sha>", "head_short": "<short sha>",
+             "dirty": 1, "untracked": 0},
+  "candidates": [{"path": "<repo>", "name": "<repo name>", "kind": "self",
+                  "branch": "main", "head_short": "<short sha>"}]
+}
+```
+
+- Creates, reserves and records nothing. `slug` is what creation would give
+  right now; a task created in between takes it, and creation then gets `-2`.
+- A blank `title` leaves `slug`, `branch`, `task_dir` and `worktree_dest` as
+  `""` (creating would `400`); everything else is filled in.
+- `source` is the git toplevel the worktree would come from (`source_repo`,
+  else the code root). `branch` is `""` on a detached HEAD; `head` /
+  `head_short` are `""` before the first commit. `dirty` counts tracked files
+  with uncommitted changes and `untracked` untracked entries (not `.RUD/`) —
+  work that will not be in the new worktree. Both are `null` when `git status`
+  fails or takes longer than 5 s.
+- Outside git: `is_git: false`, `branch` / `head` / `head_short` `""`,
+  `dirty` / `untracked` `null`.
+- When no worktree would be made, `worktree_dest` is `""` and
+  `worktree_warning` carries the sentence creation would return.
+- `source_repo` not among the candidates → `400` with `allowed`.
+
+**Change counts.** `GET /api/task-changes?project=<id>` → one entry per task:
+
+```json
+{"ok": true, "tasks": {
+  "fix-the-bug": {"branch": "loom/fix-the-bug", "worktrees": 1,
+                  "files": 3, "insertions": 6, "deletions": 1,
+                  "uncommitted": 2, "unknown_base": 0, "pending": false},
+  "notes-only": {"worktrees": 0}
+}}
+```
+
+- `files` / `insertions` / `deletions`: the net change from each worktree's
+  recorded fork commit to its working tree — committed, staged, unstaged, and
+  untracked files as additions (lines counted for text files up to 1 MiB,
+  16 MiB per worktree) — summed over the task's worktrees.
+- `uncommitted`: changed plus untracked files not yet committed.
+- `unknown_base`: worktrees left out of the totals because no fork commit was
+  recorded (tasks from before it was) or it no longer exists. A worktree whose
+  git fails or times out is left out too; `null` totals mean none could be
+  counted.
+- `branch`: the primary worktree's current branch (`""` when detached).
+- Cached per worktree: a commit, stage or checkout shows on the next poll;
+  an unstaged edit changes neither HEAD nor the index, so it shows once the
+  45 s cache entry expires (within about a minute at a 30 s poll). A request
+  waits at most ~5 s; a worktree still being counted reports its previous
+  numbers, or marks the task `pending: true` (totals partial or `null`) until
+  a later poll. Meant to be polled every ~30 s.
 
 ## Terminal and tmux
 

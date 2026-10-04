@@ -19,13 +19,17 @@ task has spawned so we can resume a session after tmux dies.
 
 from __future__ import annotations
 
+import getpass
 import json
 import os
 import re
 import shutil
+import socket
+import stat
 import subprocess
+import threading
 import time
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import Future, ThreadPoolExecutor, wait
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
@@ -1548,6 +1552,63 @@ def _git_diff(args: list[str], cwd: Path, timeout: int = 60) -> tuple[bool, str]
     return r.returncode in (0, 1), (r.stdout or "")
 
 
+def _git_bytes(args: list[str], cwd: Path, timeout: float) -> bytes | None:
+    """Raw stdout of a read-only git command, or ``None`` if it fails or times out.
+
+    Bytes rather than text because ``-z`` output carries file names verbatim:
+    one name that is not valid UTF-8 should cost a single count, not the whole
+    answer. ``--no-optional-locks`` stops a poller from refreshing the index
+    (and taking ``index.lock``) under an agent committing in the same worktree.
+    """
+    def run() -> subprocess.CompletedProcess[bytes]:
+        return subprocess.run(
+            ["git", "--no-optional-locks", *args],
+            cwd=str(cwd),
+            capture_output=True,
+            timeout=timeout,
+        )
+
+    try:
+        r = run()
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    if r.returncode != 0:
+        stderr = (r.stderr or b"").decode("utf-8", "replace")
+        safe = _dubious_ownership_safe_dir(cwd, "", stderr)
+        if safe is None or not _mark_git_safe_directory(safe):
+            return None
+        try:
+            r = run()
+        except (OSError, subprocess.TimeoutExpired):
+            return None
+    return r.stdout if r.returncode == 0 else None
+
+
+def _parse_status_z(out: bytes) -> tuple[int, list[bytes]]:
+    """``(tracked changes, untracked paths)`` from ``git status --porcelain -z``.
+
+    A rename or copy entry is followed by its source path as a field of its
+    own, which has to be skipped rather than counted as another file.
+    """
+    changed = 0
+    untracked: list[bytes] = []
+    fields = out.split(b"\0")
+    i = 0
+    while i < len(fields):
+        entry = fields[i]
+        i += 1
+        if len(entry) < 4:
+            continue
+        xy, rel = entry[:2], entry[3:]
+        if xy == b"??":
+            untracked.append(rel)
+            continue
+        changed += 1
+        if b"R" in xy or b"C" in xy:
+            i += 1
+    return changed, untracked
+
+
 def _dubious_ownership_safe_dir(cwd: Path, stdout: str, stderr: str) -> Path | None:
     text = "\n".join(x for x in (stdout, stderr) if x)
     if "detected dubious ownership" not in text:
@@ -1785,6 +1846,23 @@ def _exclude_from_git(worktree: Path, names: list[str]) -> None:
         return
 
 
+def _exclude_rud_from_repo(project_root: Path, repo_top: Path) -> None:
+    """Keep the project's ``.RUD/`` out of the user's own ``git status``.
+
+    Tasks - worktrees and all - live under ``<project>/.RUD/``, and when the
+    project sits inside the repo its tasks branch from (usually project root
+    == repo root) the first task would leave ``?? .RUD/`` in a checkout we
+    promise not to touch. One anchored info/exclude entry hides it; nothing
+    is added when ``.RUD`` lies outside *repo_top*, and ``.gitignore`` is
+    never edited.
+    """
+    try:
+        rel = rud_root(project_root).relative_to(repo_top.resolve())
+    except (OSError, ValueError):
+        return
+    _exclude_from_git(repo_top, [f"{rel.as_posix()}/"])
+
+
 def prepare_task_worktree_from(
     project_root: Path,
     slug: str,
@@ -1828,10 +1906,12 @@ def prepare_task_worktree_from(
     if add_new[0]:
         _record_worktree_base(project_root, slug, work_dir, head_out, source_branch)
         _link_agent_config(git_root, work_dir)
+        _exclude_rud_from_repo(project_root, git_root)
         return work_dir.resolve(), branch, "worktree created"
     reuse = _git(["worktree", "add", str(work_dir), branch], git_root)
     if reuse[0]:
         _link_agent_config(git_root, work_dir)
+        _exclude_rud_from_repo(project_root, git_root)
         return work_dir.resolve(), branch, "worktree attached to existing branch"
     return None, branch, f"git worktree add failed: {add_new[2] or add_new[1]} | {reuse[2]}"
 
@@ -1855,6 +1935,146 @@ def prepare_task_worktree(
             "project root is not a git repository; pick a candidate manually",
         )
     return prepare_task_worktree_from(project_root, slug, project_root)
+
+
+def _fallback_git_identity(repo: Path) -> list[str]:
+    """``-c`` pairs supplying whichever half of a commit identity git lacks.
+
+    They go on the one command that needs them and are never written to any
+    config. The check runs from inside *repo*, so an identity configured per
+    directory through ``includeIf`` still counts as configured.
+    """
+    try:
+        user = getpass.getuser()
+    except Exception:  # noqa: BLE001 - no login name in the environment or passwd
+        user = ""
+    user = user or "loom"
+    host = socket.gethostname() or "localhost"
+    args: list[str] = []
+    for key, value in (("user.name", user), ("user.email", f"{user}@{host}")):
+        ok, current, _ = _git(["config", "--get", key], repo, timeout=10)
+        if not (ok and current):
+            args += ["-c", f"{key}={value}"]
+    return args
+
+
+def init_git_repo(path: Path) -> tuple[bool, str]:
+    """Make *path* a git repository with an empty first commit.
+
+    ``git worktree add`` cannot branch from a repository that has no HEAD, so
+    the commit is what lets every task in a brand-new project get a worktree
+    of its own. Returns ``(initialized, error)``; ``(False, "")`` means *path*
+    already sits inside a git work tree and was left alone.
+    """
+    if not shutil.which("git"):
+        return False, "git is not installed on the server"
+    ok, inside, _ = _git(["rev-parse", "--is-inside-work-tree"], path, timeout=10)
+    if ok and inside == "true":
+        return False, ""
+    ok, _out, err = _git(["init"], path, timeout=30)
+    if not ok:
+        return False, err or "git init failed"
+    # Hidden from the start, not just from the first worktree on: .RUD/ also
+    # holds the notes and task files of tasks that never get one.
+    _exclude_rud_from_repo(path, path)
+    ok, _out, err = _git(
+        [*_fallback_git_identity(path), "commit", "--allow-empty", "-m", "Initial commit"],
+        path,
+        timeout=30,
+    )
+    if not ok:
+        return False, (
+            "created the repository, but its first commit failed: "
+            f"{err or 'git commit failed'}"
+        )
+    return True, ""
+
+
+def preview_task_paths(
+    project_root: Path, title: str, repo_name: str = ""
+) -> dict[str, str]:
+    """The names ``create_task`` + ``prepare_task_worktree_from`` would use.
+
+    Creates and reserves nothing: a task made in between takes the slug and
+    this one becomes ``-2``. All empty for a blank *title* (creation refuses
+    one); ``worktree_dest`` is empty without a *repo_name*, i.e. when no
+    worktree would be made.
+    """
+    if not title.strip():
+        return {"slug": "", "branch": "", "task_dir": "", "worktree_dest": ""}
+    project_root = project_root.resolve()
+    slug = ensure_unique_slug(project_root, slugify(title))
+    td = task_root(project_root, slug)
+    return {
+        "slug": slug,
+        "branch": _branch_name_for(slug),
+        "task_dir": str(td),
+        "worktree_dest": str(td / WORK_SUBDIR / repo_name) if repo_name else "",
+    }
+
+
+def repo_head_summary(repo: Path) -> dict[str, str]:
+    """``{branch, head_short}`` for a repo picker row.
+
+    ``branch`` is "" on a detached HEAD, ``head_short`` "" before the first
+    commit.
+    """
+    ok, short, _ = _git(["rev-parse", "--short", "HEAD"], repo, timeout=10)
+    return {"branch": _detect_branch_in(repo), "head_short": short if ok else ""}
+
+
+def describe_source_repo(
+    path: Path, *, status_timeout: float = 5.0, with_status: bool = True
+) -> dict[str, Any]:
+    """The repository a new task's worktree would be branched from.
+
+    Mirrors ``prepare_task_worktree_from``: the worktree comes from the git
+    toplevel *path* sits in and starts at its HEAD, so that is what gets
+    described. ``dirty`` counts tracked files with uncommitted changes and
+    ``untracked`` the untracked entries - work that will NOT be in the new
+    worktree. Both are ``None`` when ``git status`` fails or outruns
+    *status_timeout* (a multi-GB checkout can), so one slow repo costs the
+    preview two numbers rather than the whole answer, and without
+    *with_status*. Outside git only ``path`` and ``name`` are filled in.
+    """
+    try:
+        path = path.expanduser().resolve()
+    except OSError:
+        pass
+    info: dict[str, Any] = {
+        "path": str(path),
+        "name": path.name,
+        "is_git": False,
+        "branch": "",
+        "head": "",
+        "head_short": "",
+        "dirty": None,
+        "untracked": None,
+    }
+    top = git_toplevel(path)
+    if top is None:
+        return info
+    top = top.resolve()
+    info.update(path=str(top), name=top.name, is_git=True, **repo_head_summary(top))
+    ok, head, _ = _git(["rev-parse", "--verify", "--quiet", "HEAD"], top, timeout=10)
+    info["head"] = head if ok else ""
+    if not with_status:
+        return info
+    status = _git_bytes(
+        ["status", "--porcelain", "-z", "--ignore-submodules=dirty"],
+        top,
+        status_timeout,
+    )
+    if status is not None:
+        dirty, untracked = _parse_status_z(status)
+        info["dirty"] = dirty
+        # Loom's own .RUD/ shows up untracked in any repo-rooted project that
+        # has tasks; it is not the user's work in progress, so not counted.
+        rud = RUD_DIR.encode()
+        info["untracked"] = sum(
+            1 for rel in untracked if rud not in rel.rstrip(b"/").split(b"/")
+        )
+    return info
 
 
 def worktree_status(wt: Path) -> dict[str, Any] | None:
@@ -2204,6 +2424,319 @@ def list_task_worktree_statuses(project_root: Path, slug: str) -> list[dict[str,
     max_workers = min(len(paths), 8)
     with ThreadPoolExecutor(max_workers=max_workers) as pool:
         return list(pool.map(_safe_status, paths))
+
+
+# --- Sidebar change counts --------------------------------------------------
+
+_COMMIT_SHA_RE = re.compile(r"^[0-9a-f]{7,64}$")
+# Counting an untracked file's lines means reading it, so that is bounded:
+# regular files up to 1 MiB, 16 MiB per worktree in all. A file past either
+# limit still counts as a changed file, just without its lines.
+_UNTRACKED_LINES_MAX_FILE = 1 << 20
+_UNTRACKED_LINES_BUDGET = 16 << 20
+
+
+def _blank_change_counts() -> dict[str, Any]:
+    return {
+        "files": None,
+        "insertions": None,
+        "deletions": None,
+        "uncommitted": None,
+        "unknown_base": False,
+    }
+
+
+def _untracked_insertions(wt: Path, rels: list[bytes]) -> int:
+    """Lines the untracked files *rels* would add, counted the way git does.
+
+    A symlink is one line (git stores its target); a file with a NUL in its
+    first 8000 bytes is binary and adds none, which is git's own heuristic.
+    Only regular files are read, opened non-blocking - a FIFO sitting in a
+    worktree must not hang the poller.
+    """
+    total = 0
+    budget = _UNTRACKED_LINES_BUDGET
+    for rel in rels:
+        target = wt / os.fsdecode(rel)
+        try:
+            st = os.lstat(target)
+        except OSError:
+            continue
+        if stat.S_ISLNK(st.st_mode):
+            total += 1
+            continue
+        if not stat.S_ISREG(st.st_mode):
+            continue
+        if not 0 < st.st_size <= min(_UNTRACKED_LINES_MAX_FILE, budget):
+            continue
+        try:
+            fd = os.open(target, os.O_RDONLY | os.O_NONBLOCK | getattr(os, "O_NOFOLLOW", 0))
+        except OSError:
+            continue
+        with os.fdopen(fd, "rb") as fh:
+            try:
+                if not stat.S_ISREG(os.fstat(fd).st_mode):
+                    continue
+                data = fh.read(_UNTRACKED_LINES_MAX_FILE)
+            except OSError:
+                continue
+        budget -= len(data)
+        if not data or b"\0" in data[:8000]:
+            continue
+        total += data.count(b"\n") + (0 if data.endswith(b"\n") else 1)
+    return total
+
+
+def worktree_head_state(wt: Path) -> dict[str, Any] | None:
+    """A cheap fingerprint of what *wt* has committed and staged.
+
+    One ``rev-parse`` and one ``stat``, no working-tree scan: a commit, reset
+    or checkout moves HEAD and staging rewrites the index, so this changes
+    whenever the expensive counts could have - except for unstaged edits,
+    which nothing short of a scan can see. ``branch`` is "" on a detached
+    HEAD; ``None`` means git cannot read the worktree as itself.
+    """
+    ok, out, _ = _git(
+        [
+            "rev-parse", "--show-toplevel", "--git-path", "index",
+            "HEAD", "--symbolic-full-name", "HEAD",
+        ],
+        wt,
+        timeout=10,
+    )
+    lines = out.splitlines() if ok else []
+    if len(lines) < 4:
+        return None
+    try:
+        # A folder that lost its .git sits inside the project's own repo, and
+        # git would happily answer for that repo instead - counting the
+        # user's checkout as the task's change.
+        if Path(lines[0]).resolve() != wt.resolve():
+            return None
+    except OSError:
+        return None
+    index = Path(lines[1])
+    if not index.is_absolute():
+        index = wt / index
+    try:
+        st = index.stat()
+        index_state = (st.st_mtime_ns, st.st_size)
+    except OSError:
+        index_state = (0, 0)
+    ref = lines[3]
+    return {
+        "head": lines[2],
+        "branch": ref[len("refs/heads/"):] if ref.startswith("refs/heads/") else "",
+        "index": index_state,
+    }
+
+
+def worktree_change_counts(
+    wt: Path, base: str, *, timeout: float = 20.0
+) -> dict[str, Any]:
+    """One worktree's change against its fork *base*, for the task sidebar.
+
+    ``files`` / ``insertions`` / ``deletions`` are the net change from *base*
+    to the working tree - ``git diff <base>`` covers committed and uncommitted
+    edits to tracked files at once - plus untracked files as additions.
+    ``uncommitted`` counts the changed and untracked files ``git status``
+    reports. A number is ``None`` when it cannot be known: a base that was
+    never recorded, or no longer resolves, sets ``unknown_base``, and a git
+    call that fails or outruns *timeout* leaves its numbers out.
+    """
+    counts = _blank_change_counts()
+    status = _git_bytes(
+        ["status", "--porcelain", "-z", "--untracked-files=all", "--ignore-submodules=dirty"],
+        wt,
+        timeout,
+    )
+    untracked: list[bytes] = []
+    if status is not None:
+        changed, untracked = _parse_status_z(status)
+        counts["uncommitted"] = changed + len(untracked)
+    base = base.strip().lower()
+    # The base only ever comes from task.json; insisting on a commit id keeps
+    # a hand-edited value from ever reaching git as an option.
+    if not _COMMIT_SHA_RE.match(base) or not _git(
+        ["rev-parse", "--verify", "--quiet", f"{base}^{{commit}}"], wt, timeout=10
+    )[0]:
+        counts["unknown_base"] = True
+        return counts
+    if status is None:
+        # Without the untracked list the total would quietly undercount.
+        return counts
+    numstat = _git_bytes(
+        [
+            "diff", "--numstat", "--no-color", "--no-ext-diff", "--no-textconv",
+            "--find-renames", "--ignore-submodules=dirty", base, "--",
+        ],
+        wt,
+        timeout,
+    )
+    if numstat is None:
+        return counts
+    files = insertions = deletions = 0
+    for line in numstat.splitlines():
+        parts = line.split(b"\t", 2)
+        if len(parts) < 3:
+            continue
+        files += 1
+        # A binary file shows "-" in both columns, as in git's own stat.
+        if parts[0].isdigit():
+            insertions += int(parts[0])
+        if parts[1].isdigit():
+            deletions += int(parts[1])
+    counts.update(
+        files=files + len(untracked),
+        insertions=insertions + _untracked_insertions(wt, untracked),
+        deletions=deletions,
+    )
+    return counts
+
+
+class TaskChangeCounter:
+    """Sidebar change counts for every task in a project, cached per worktree.
+
+    The sidebar asks for a whole project every ~30 s, and one ``git status``
+    in a multi-GB checkout can take seconds, so:
+
+    - a worktree's counts are reused while its HEAD commit, branch and index
+      stat are unchanged (a commit, stage or checkout shows on the next poll)
+      and younger than *ttl*; unstaged edits change none of those, so they
+      show once the TTL runs out;
+    - counting runs on one small shared pool with at most one job per
+      worktree in flight, so overlapping polls from several tabs never stack
+      git processes on the same checkout;
+    - a poll waits at most *wait_seconds*: a worktree still being counted
+      reports its previous numbers, or ``pending`` before it has any, and the
+      job finishes in the background for the next poll.
+    """
+
+    def __init__(
+        self,
+        *,
+        ttl: float = 45.0,
+        wait_seconds: float = 5.0,
+        workers: int = 8,
+        git_timeout: float = 20.0,
+    ) -> None:
+        self.ttl = ttl
+        self.wait_seconds = wait_seconds
+        self.git_timeout = git_timeout
+        self._lock = threading.Lock()
+        self._cache: dict[str, dict[str, Any]] = {}
+        self._inflight: dict[str, Future] = {}
+        self._pool = ThreadPoolExecutor(
+            max_workers=workers, thread_name_prefix="loom-changes"
+        )
+
+    def project_changes(self, project_root: Path) -> dict[str, dict[str, Any]]:
+        """``{slug: counts}`` for every task under *project_root*."""
+        plan: list[tuple[TaskMeta, list[str]]] = []
+        jobs: dict[str, Future] = {}
+        for meta in list_tasks(project_root):
+            paths: list[str] = []
+            for p in meta.worktrees:
+                try:
+                    if not Path(p).is_dir():
+                        continue
+                except OSError:
+                    continue
+                paths.append(p)
+                if p not in jobs:
+                    bases = meta.worktree_bases
+                    info = bases.get(p) or bases.get(str(Path(p).resolve())) or {}
+                    jobs[p] = self._submit(p, str(info.get("commit", "")))
+            plan.append((meta, paths))
+        if jobs:
+            wait(list(jobs.values()), timeout=self.wait_seconds)
+        results: dict[str, dict[str, Any] | None] = {}
+        with self._lock:
+            for p, fut in jobs.items():
+                fresh = fut.done() and not fut.cancelled() and fut.exception() is None
+                results[p] = fut.result() if fresh else self._cache.get(p)
+        return {meta.slug: self._task_row(meta, paths, results) for meta, paths in plan}
+
+    @staticmethod
+    def _task_row(
+        meta: TaskMeta, paths: list[str], results: dict[str, dict[str, Any] | None]
+    ) -> dict[str, Any]:
+        if not paths:
+            return {"worktrees": 0}
+        row: dict[str, Any] = {
+            "branch": meta.branch,
+            "worktrees": len(paths),
+            "files": None,
+            "insertions": None,
+            "deletions": None,
+            "uncommitted": None,
+            "unknown_base": 0,
+            "pending": False,
+        }
+        primary = results.get(paths[0])
+        if primary is not None and primary.get("branch") is not None:
+            row["branch"] = primary["branch"]
+        for p in paths:
+            got = results.get(p)
+            if got is None:
+                row["pending"] = True
+                continue
+            if got.get("unknown_base"):
+                row["unknown_base"] += 1
+            for key in ("files", "insertions", "deletions", "uncommitted"):
+                if got.get(key) is not None:
+                    row[key] = (row[key] or 0) + got[key]
+        return row
+
+    def _submit(self, path: str, base: str) -> Future:
+        with self._lock:
+            fut = self._inflight.get(path)
+            if fut is not None and not fut.done():
+                return fut
+            fut = self._pool.submit(self._count, path, base)
+            self._inflight[path] = fut
+        fut.add_done_callback(lambda done, p=path: self._forget(p, done))
+        return fut
+
+    def _forget(self, path: str, fut: Future) -> None:
+        with self._lock:
+            if self._inflight.get(path) is fut:
+                del self._inflight[path]
+
+    def _count(self, path: str, base: str) -> dict[str, Any]:
+        wt = Path(path)
+        try:
+            state = worktree_head_state(wt)
+            key = None if state is None else (
+                state["head"], state["branch"], state["index"], base
+            )
+            with self._lock:
+                hit = self._cache.get(path)
+            if (
+                key is not None
+                and hit is not None
+                and hit["key"] == key
+                and time.monotonic() - hit["at"] < self.ttl
+            ):
+                return hit
+            if state is None:
+                counts = {**_blank_change_counts(), "branch": None}
+            else:
+                counts = {
+                    **worktree_change_counts(wt, base, timeout=self.git_timeout),
+                    "branch": state["branch"],
+                }
+        except Exception:  # noqa: BLE001 - one odd worktree must not sink the poll
+            key, counts = None, {**_blank_change_counts(), "branch": None}
+        entry = {"key": key, "at": time.monotonic(), **counts}
+        with self._lock:
+            self._cache[path] = entry
+            # Worktrees that were deleted, or belong to a project nobody is
+            # looking at any more, age out instead of piling up.
+            cutoff = entry["at"] - max(3600.0, 10 * self.ttl)
+            for old in [p for p, e in self._cache.items() if e["at"] < cutoff]:
+                del self._cache[old]
+        return entry
 
 
 def push_worktree_branch(wt: Path) -> dict[str, Any]:
