@@ -65,6 +65,11 @@ P0/P1 findings open a fresh repair session for the implementer. After at most
 two review rounds by default, Loom stops at a human gate. It never pushes or
 merges the branch.
 
+For the complete b2 + CI Kubernetes workflow—including task creation, model
+selection, durable experiment runs, GPU-worker provisioning, monitoring,
+review, recovery, and cleanup—follow the
+**[Loom CI Development Onboarding](docs/LOOM-CI-DEVELOPMENT-ONBOARDING.md)**.
+
 ### Finish an existing paper
 
 Choose **Author — finish an existing paper** in the Create Task dialog. Give
