@@ -211,6 +211,8 @@ loom web --project /path --openclaw \
   everything lives on disk.
 - **[docs/PAPER-PIPELINE.md](docs/PAPER-PIPELINE.md)** — how a paper actually
   gets written: studio steps, gates, the readiness gate, the reviewer panel.
+- **[docs/USAGE_BUDGETS.md](docs/USAGE_BUDGETS.md)** — context rotation,
+  cost-safe model defaults, AR round limits, and their environment overrides.
 - **[docs/OPENCLAW.md](docs/OPENCLAW.md)** — notifications in Slack and
   replying to agents from there.
 - **[docs/AGENT-GATEWAY.md](docs/AGENT-GATEWAY.md)** — Loom over MCP: how

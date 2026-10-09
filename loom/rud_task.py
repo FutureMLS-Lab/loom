@@ -55,7 +55,21 @@ AGENT_CURSOR = "cursor"
 AGENT_CLAUDE = "claude"
 AGENT_CODEX = "codex"
 SUPPORTED_AGENTS = frozenset({AGENT_CURSOR, AGENT_CLAUDE, AGENT_CODEX})
-CURSOR_DEFAULT_MODEL = "gpt-5.6-sol-max-fast"
+# Keep the common task/author default affordable. Operators can override it
+# without rebuilding Loom when account pricing or the Cursor catalogue moves.
+CURSOR_DEFAULT_MODEL = (
+    os.environ.get("LOOM_CURSOR_DEFAULT_MODEL", "grok-4.7-high-fast").strip()
+    or "grok-4.7-high-fast"
+)
+
+# Logical transcript footprint is not an exact token count (the supported
+# agents expose JSONL with different schemas), but it is a stable, provider-neutral
+# signal for the failure mode that matters here: every subsequent tool turn
+# re-reading an ever-growing conversation. Warn at 4 MiB and require a compact
+# handoff at 8 MiB. Operators can tune both thresholds without rebuilding Loom.
+DEFAULT_SESSION_CONTEXT_WARNING_BYTES = 4 * 1024 * 1024
+DEFAULT_SESSION_CONTEXT_BUDGET_BYTES = 8 * 1024 * 1024
+DEFAULT_CLAUDE_EFFORT = "max"
 
 # Models currently available to this installation. These feed the web pickers;
 # the fields remain editable, so an API/CLI model added later can be typed
@@ -204,6 +218,10 @@ _LEGACY_DEFAULT_MODELS = {"claude-sonnet-4-6", "claude-opus-4-8"}
 _INVALID_CURSOR_DEFAULT_MODELS = {
     "gpt-5.6-sol-max",
     "gpt-5.6-sol-max[context=1m]",
+    # This was Loom's expensive default through 2026-09-27. Treat it as a
+    # default-shaped value, not an intentional pin, so existing tasks move to
+    # the current affordable default on their next fresh session.
+    "gpt-5.6-sol-max-fast",
 }
 
 
@@ -245,13 +263,16 @@ def build_agent_command(
             cmd += ["-c", f"model={model.strip()}"]
         return cmd
     # Claude
+    effort = os.environ.get("LOOM_CLAUDE_EFFORT", DEFAULT_CLAUDE_EFFORT).strip().lower()
+    if effort not in {"low", "medium", "high", "max"}:
+        effort = DEFAULT_CLAUDE_EFFORT
     cmd = [
         "claude",
         "--model",
         model or agent_default_model(AGENT_CLAUDE),
         "--dangerously-skip-permissions",
         "--effort",
-        "max",
+        effort,
     ]
     if resume_session_id:
         cmd += ["--resume", resume_session_id]
@@ -1366,7 +1387,10 @@ def claude_project_dir(cwd: Path) -> Path:
     ``/home/u/proj/.RUD/foo/work/r`` becomes
     ``-home-u-proj--RUD-foo-work-r`` (the double dash represents ``/.``).
     """
-    s = str(cwd.resolve())
+    # ``resolve`` rewrites synthetic Linux paths through macOS's
+    # /System/Volumes/Data mount, which is not how Claude encodes the caller's
+    # cwd. ``absolute`` normalizes relatives without following host symlinks.
+    s = str(cwd.expanduser().absolute())
     encoded = re.sub(r"[/.]", "-", s)
     return (Path.home() / ".claude" / "projects" / encoded).resolve()
 
@@ -1436,24 +1460,140 @@ def _list_cursor_session_files(cwd: Path) -> list[Path]:
 
     Cursor stores chats at ``~/.cursor/chats/<workspace>/<chat-id>/meta.json``;
     the chat-id directory name is accepted by ``agent --resume <chat-id>``.
+    Older Cursor builds stored Agent transcripts below
+    ``~/.cursor/projects/<encoded-cwd>/agent-transcripts``; include those too
+    so upgraded Loom installations can still measure and guard old sessions.
     """
     base = (Path.home() / ".cursor" / "chats").resolve()
-    if not base.is_dir():
-        return []
     try:
         target = str(cwd.resolve())
     except OSError:
         return []
     out: list[Path] = []
-    for p in base.glob("*/*/meta.json"):
-        try:
-            data = json.loads(p.read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError):
-            continue
-        if isinstance(data, dict) and str(data.get("cwd") or "") == target:
-            out.append(p)
+    if base.is_dir():
+        for p in base.glob("*/*/meta.json"):
+            try:
+                data = json.loads(p.read_text(encoding="utf-8"))
+            except (OSError, json.JSONDecodeError):
+                continue
+            if isinstance(data, dict) and str(data.get("cwd") or "") == target:
+                out.append(p)
+
+    encoded = target.lstrip(os.sep).replace(os.sep, "-")
+    legacy = Path.home() / ".cursor" / "projects" / encoded / "agent-transcripts"
+    if legacy.is_dir():
+        out.extend(p for p in legacy.glob("*/*.jsonl") if p.is_file())
     out.sort(key=lambda p: p.stat().st_mtime)
     return out
+
+
+def session_context_budget_bytes() -> int:
+    """Configured per-session transcript budget in bytes.
+
+    ``LOOM_SESSION_CONTEXT_BUDGET_MB=0`` disables the guard.  Invalid values
+    fall back to the safe default; positive values are clamped to a practical
+    range so a typo cannot accidentally create a near-zero or unbounded limit.
+    """
+    raw = os.environ.get("LOOM_SESSION_CONTEXT_BUDGET_MB", "").strip()
+    if not raw:
+        return DEFAULT_SESSION_CONTEXT_BUDGET_BYTES
+    try:
+        mb = float(raw)
+    except ValueError:
+        return DEFAULT_SESSION_CONTEXT_BUDGET_BYTES
+    if mb == 0:
+        return 0
+    mb = max(0.25, min(64.0, mb))
+    return int(mb * 1024 * 1024)
+
+
+def session_context_warning_bytes() -> int:
+    """Soft warning threshold; the hard budget still controls blocking."""
+    budget = session_context_budget_bytes()
+    if budget == 0:
+        return 0
+    raw = os.environ.get("LOOM_SESSION_CONTEXT_WARNING_MB", "").strip()
+    if not raw:
+        configured = DEFAULT_SESSION_CONTEXT_WARNING_BYTES
+    else:
+        try:
+            mb = float(raw)
+        except ValueError:
+            configured = DEFAULT_SESSION_CONTEXT_WARNING_BYTES
+        else:
+            if mb == 0:
+                return 0
+            configured = int(max(0.25, min(64.0, mb)) * 1024 * 1024)
+    return min(configured, budget)
+
+
+def _cursor_transcript_for_meta(path: Path) -> Path | None:
+    """Return Cursor's JSONL transcript for a new-store ``meta.json``."""
+    if path.name != "meta.json":
+        return None
+    sid = path.parent.name
+    matches = list(
+        (Path.home() / ".cursor" / "projects").glob(
+            f"*/agent-transcripts/{sid}/{sid}.jsonl"
+        )
+    )
+    return max(matches, key=lambda item: item.stat().st_mtime) if matches else None
+
+
+def session_footprint_bytes(path: Path, agent: str = AGENT_CURSOR) -> int:
+    """Best-effort transcript footprint for one resumable conversation.
+
+    Cursor's ``store.db`` is a content-addressed artifact store containing file
+    snapshots and tool payloads as well as chat data. Summing its blobs can
+    overstate a 160 KiB conversation as several MiB, so only the canonical
+    JSONL transcript is used for enforcement. A brand-new chat that has not
+    emitted JSONL yet reports zero rather than a false hard-limit violation.
+    """
+    agent = normalize_agent(agent)
+    if agent == AGENT_CURSOR and path.name == "meta.json":
+        transcript = _cursor_transcript_for_meta(path)
+        if transcript is None:
+            return 0
+        path = transcript
+    try:
+        return path.stat().st_size
+    except OSError:
+        return 0
+
+
+def session_usage(path: Path, agent: str = AGENT_CURSOR) -> dict[str, Any]:
+    """Portable context-budget metadata for a transcript path."""
+    agent = normalize_agent(agent)
+    source = "transcript"
+    reliable = True
+    if agent == AGENT_CURSOR and path.name == "meta.json":
+        transcript = _cursor_transcript_for_meta(path)
+        if transcript is None:
+            source = "pending_transcript"
+            reliable = False
+        else:
+            source = "cursor_transcript"
+    elif agent == AGENT_CURSOR:
+        source = "cursor_transcript"
+    size = session_footprint_bytes(path, agent)
+    budget = session_context_budget_bytes()
+    warning = session_context_warning_bytes()
+    over_budget = bool(reliable and budget and size >= budget)
+    return {
+        "size": size,
+        "measurement_source": source,
+        "measurement_reliable": reliable,
+        # Deliberately labelled an estimate in the UI. JSON framing makes this
+        # conservative; providers may charge additional cached
+        # prompt tokens that are not represented on disk.
+        "estimated_tokens": (size + 3) // 4,
+        "budget_bytes": budget,
+        "warning_bytes": warning,
+        "near_budget": bool(
+            reliable and warning and size >= warning and not over_budget
+        ),
+        "over_budget": over_budget,
+    }
 
 
 def list_session_files(cwd: Path, agent: str = AGENT_CURSOR) -> list[Path]:
@@ -1481,7 +1621,11 @@ def session_id_from_path(path: Path, agent: str = AGENT_CURSOR) -> str:
     """
     agent = normalize_agent(agent)
     if agent == AGENT_CURSOR:
-        return path.parent.name if path.name == "meta.json" else ""
+        if path.name == "meta.json":
+            return path.parent.name
+        if path.suffix == ".jsonl":
+            return path.stem
+        return ""
     if agent == AGENT_CODEX:
         meta = _read_codex_session_meta(path)
         if meta:

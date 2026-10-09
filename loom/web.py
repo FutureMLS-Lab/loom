@@ -137,6 +137,9 @@ from loom.rud_task import (
     reorder_tasks,
     rename_task_meta,
     session_id_from_path,
+    session_context_budget_bytes,
+    session_context_warning_bytes,
+    session_usage,
     split_skills_paths,
     task_root,
     task_worktree_diffs,
@@ -154,6 +157,13 @@ from loom.tmux_util import (
     send_pane_text,
     tmux_subprocess_env,
     validate_tmux_target,
+)
+from loom.usage_budget import (
+    clear_budget_marker,
+    parse_pane_usage,
+    read_budget_marker,
+    usage_budget_violation,
+    write_budget_marker,
 )
 from loom.web_projects import WebProjectRegistry
 
@@ -610,6 +620,125 @@ def _task_pane_cwd(project_root: Path, slug: str, meta=None) -> Path:
     return wt if wt is not None else td
 
 
+def _task_session_infos(project_root: Path, slug: str, meta) -> list[dict[str, Any]]:
+    """Every known session, newest first, enriched with context-budget data."""
+    agent = normalize_agent(meta.agent)
+    candidates: list[Path] = []
+    for candidate in (
+        _task_pane_cwd(project_root, slug, meta),
+        *list_task_worktrees(project_root, slug),
+        task_root(project_root, slug),
+    ):
+        if candidate and candidate not in candidates:
+            candidates.append(candidate)
+
+    files_by_id: dict[str, dict[str, Any]] = {}
+    for cwd in candidates:
+        for path in list_session_files(cwd, agent):
+            sid = session_id_from_path(path, agent)
+            if not sid:
+                continue
+            try:
+                mtime = path.stat().st_mtime
+            except OSError:
+                continue
+            info = {
+                "id": sid,
+                "path": str(path),
+                "mtime": mtime,
+                **session_usage(path, agent),
+            }
+            info["_source_priority"] = 2 if path.suffix == ".jsonl" else 1
+            previous = files_by_id.get(sid)
+            previous_priority = int((previous or {}).get("_source_priority") or 0)
+            if (
+                previous is None
+                or info["_source_priority"] > previous_priority
+                or (
+                    info["_source_priority"] == previous_priority
+                    and mtime >= float(previous.get("mtime") or 0.0)
+                )
+            ):
+                files_by_id[sid] = info
+
+    ordered: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for sid in meta.claude_session_ids:
+        ordered.append(
+            files_by_id.get(
+                sid,
+                {
+                    "id": sid,
+                    "path": "",
+                    "mtime": 0.0,
+                    "size": 0,
+                    "estimated_tokens": 0,
+                    "budget_bytes": session_context_budget_bytes(),
+                    "warning_bytes": session_context_warning_bytes(),
+                    "near_budget": False,
+                    "over_budget": False,
+                },
+            )
+        )
+        seen.add(sid)
+    for sid, info in files_by_id.items():
+        if sid not in seen:
+            ordered.append(info)
+    ordered.sort(key=lambda item: float(item.get("mtime") or 0.0), reverse=True)
+    for item in ordered:
+        item.pop("_source_priority", None)
+    return ordered
+
+
+def _build_session_handoff_prompt(
+    project_root: Path,
+    slug: str,
+    *,
+    default_skills: Path | None = None,
+    user_text: str = "",
+) -> str:
+    """Small, cache-stable handoff that reloads durable state from files.
+
+    Re-pasting the entire original prompt defeats the point of rotating a large
+    conversation. Paths are stable across sessions, while PLAN.md and the
+    worktree carry the changing state. The new agent reads only the current
+    files instead of replaying chat history.
+    """
+    meta = read_meta(project_root, slug)
+    if not meta:
+        return ""
+    td = task_root(project_root, slug)
+    selected = [p for p in split_skills_paths(meta.skills_path) if p.is_file()]
+    if not selected:
+        fallback = default_skills if default_skills and default_skills.is_file() else bundled_skills_path()
+        selected = [fallback]
+    skills = "\n".join(f"- {path.resolve()}" for path in selected)
+    wt = task_worktree_path(project_root, slug)
+    instruction = (
+        f"\n\nCurrent user instruction:\n{user_text.strip()}"
+        if user_text.strip()
+        else "\n\nContinue from the next unfinished item in PLAN.md, then wait if no action is pending."
+    )
+    return f"""You are continuing Loom task `{slug}` in a fresh context window.
+
+Reload durable task state from disk; do not reconstruct or request the old chat.
+Read these sources in order:
+1. Loom working rules: {default_prompt_path()}
+2. Task ledger: {td / PLAN}
+3. Project memory, if present: {project_root / RUD_DIR / 'MEMORY.md'}
+4. Selected skill files relevant to the current action:
+{skills}
+
+Work directory: {td / 'work'}
+Primary worktree: {wt or '(none)'}
+
+Keep expensive context bounded: use targeted file reads, avoid reopening an
+entire large PDF/log/source tree when a focused page or range is enough, and
+write durable decisions/results back to PLAN.md before the next handoff.
+{instruction}
+"""
+
+
 # --- Claude tmux registry ---------------------------------------------------
 
 
@@ -688,6 +817,7 @@ class ClaudeRegistry:
         slug: str,
         *,
         resume_session_id: str = "",
+        allow_oversize_resume: bool = False,
         default_skills: Path | None = None,
         env: dict[str, str] | None = None,
     ) -> dict[str, Any]:
@@ -703,6 +833,30 @@ class ClaudeRegistry:
         cwd = _task_pane_cwd(project_root, slug, meta)
 
         agent = normalize_agent(meta.agent)
+        if resume_session_id and not allow_oversize_resume:
+            resume_info = next(
+                (
+                    item
+                    for item in _task_session_infos(project_root, slug, meta)
+                    if item.get("id") == resume_session_id
+                ),
+                None,
+            )
+            marker = read_budget_marker(td)
+            if (resume_info and resume_info.get("over_budget")) or marker.get(
+                "rotate_required"
+            ):
+                return {
+                    "ok": False,
+                    "code": "context_budget_exceeded",
+                    "error": (
+                        "This session is over Loom's context budget. Start a fresh "
+                        "session from PLAN.md instead, or explicitly confirm the "
+                        "expensive resume."
+                    ),
+                    "session": resume_info,
+                    "reason": str(marker.get("reason") or ""),
+                }
         selected_model = meta.interview_model or agent_default_model(agent)
         if agent == AGENT_CURSOR:
             fast_model = prefer_cursor_fast_model(selected_model)
@@ -786,6 +940,7 @@ class ClaudeRegistry:
                     args=(project_root, slug, cwd, agent, existing_ids),
                     daemon=True,
                 ).start()
+                clear_budget_marker(td)
                 update_meta(project_root, slug, tmux_interview_target=target)
                 return {
                     "ok": True,
@@ -853,6 +1008,8 @@ class ClaudeRegistry:
         if not ok:
             self._kill_tmux_session(session_name)
             return {"ok": False, "error": error}
+        if not resume_session_id:
+            clear_budget_marker(td)
         watch_cursor_ready()
 
         update_meta(project_root, slug, tmux_interview_target=target)
@@ -872,6 +1029,135 @@ class ClaudeRegistry:
             "resumed_session_id": resume_session_id or None,
             "already_running": False,
             "prompt_pending": not bool(resume_session_id),
+        }
+
+    def context_status(self, project_root: Path, slug: str) -> dict[str, Any]:
+        """Usage data for the newest transcript belonging to one task."""
+        meta = read_meta(project_root, slug)
+        if not meta:
+            return {"over_budget": False, "session": None}
+        sessions = _task_session_infos(project_root, slug, meta)
+        current = sessions[0] if sessions else None
+        target = (meta.tmux_interview_target or "").strip()
+        live_usage: dict[str, Any] = {}
+        live_reason = ""
+        if target:
+            ok, pane_text = capture_pane(target, 40)
+            if ok:
+                live_usage = parse_pane_usage(pane_text)
+                live_reason = usage_budget_violation(live_usage)
+        marker = read_budget_marker(task_root(project_root, slug))
+        if live_reason and not marker.get("rotate_required"):
+            marker = write_budget_marker(
+                task_root(project_root, slug),
+                target=target,
+                reason=live_reason,
+                usage=live_usage,
+            )
+        marker_requires_rotation = bool(marker.get("rotate_required"))
+        return {
+            "over_budget": bool(
+                (current and current.get("over_budget"))
+                or live_reason
+                or marker_requires_rotation
+            ),
+            "session": current,
+            "live_usage": live_usage,
+            "reason": live_reason or str(marker.get("reason") or ""),
+            "rotation_required": marker_requires_rotation,
+        }
+
+    def rotate(
+        self,
+        project_root: Path,
+        project_id: str,
+        slug: str,
+        *,
+        default_skills: Path | None = None,
+        env: dict[str, str] | None = None,
+    ) -> dict[str, Any]:
+        """Replace a task's pane with a fresh, non-resumed agent session."""
+        self.stop(project_root, project_id, slug)
+        result = self.start(
+            project_root,
+            project_id,
+            slug,
+            default_skills=default_skills,
+            env=env,
+        )
+        if result.get("ok"):
+            result["rotated"] = True
+        return result
+
+    def rotate_and_send(
+        self,
+        project_root: Path,
+        project_id: str,
+        slug: str,
+        text: str,
+        *,
+        default_skills: Path | None = None,
+        env: dict[str, str] | None = None,
+    ) -> dict[str, Any]:
+        """Fresh-session handoff used when the context guard trips."""
+        result = self.rotate(
+            project_root,
+            project_id,
+            slug,
+            default_skills=default_skills,
+            env=env,
+        )
+        if not result.get("ok"):
+            return result
+        target = str(result.get("target") or "")
+        self.wait_until_ready(target, timeout=30.0)
+        handoff = _build_session_handoff_prompt(
+            project_root,
+            slug,
+            default_skills=default_skills,
+            user_text=text,
+        )
+        ok, error = send_pane_text(target, handoff, submit=True)
+        if not ok:
+            return {"ok": False, "error": error, "target": target, "rotated": True}
+        return {
+            **result,
+            "ok": True,
+            "target": target,
+            "prompt_chars": len(handoff),
+            "prompt_pending": False,
+        }
+
+    def paste_handoff_prompt(
+        self,
+        project_root: Path,
+        project_id: str,
+        slug: str,
+        *,
+        default_skills: Path | None = None,
+    ) -> dict[str, Any]:
+        """Paste the compact PLAN.md-backed prompt after a manual rotation."""
+        meta = read_meta(project_root, slug)
+        if not meta:
+            return {"ok": False, "error": "Task not found"}
+        agent = normalize_agent(meta.agent)
+        session_name = self._live_or_default_session(
+            project_id, slug, agent, meta.tmux_interview_target or ""
+        )
+        target = (meta.tmux_interview_target or "").strip() or f"{session_name}:0.0"
+        prompt = _build_session_handoff_prompt(
+            project_root, slug, default_skills=default_skills
+        )
+        if not prompt:
+            return {"ok": False, "error": "empty handoff prompt", "target": target}
+        ok, error = send_pane_text(target, prompt, submit=True)
+        if not ok:
+            return {"ok": False, "error": error, "target": target}
+        return {
+            "ok": True,
+            "target": target,
+            "prompt_chars": len(prompt),
+            "handoff": True,
         }
 
     def paste_prompt(
@@ -1420,67 +1706,23 @@ def make_handler(
         def _claude_session_summary(self, project_id: str, slug: str, meta) -> dict[str, Any]:
             agent = normalize_agent(meta.agent)
             root = pr.get_path(project_id)
-            # A session can live under the current pane cwd (work/) OR under any
-            # worktree where a pane was historically launched. Scan them all so
-            # Resume finds every session this task ever spawned.
-            candidates: list[Path] = []
-            for c in (
-                _task_pane_cwd(root, slug, meta),
-                *list_task_worktrees(root, slug),
-                task_root(root, slug),
-            ):
-                if c and c not in candidates:
-                    candidates.append(c)
-            files_by_id: dict[str, dict[str, Any]] = {}
-            for cwd in candidates:
-                for p in list_session_files(cwd, agent):
-                    sid = session_id_from_path(p, agent)
-                    if not sid:
-                        continue
-                    try:
-                        stat = p.stat()
-                    except OSError:
-                        continue
-                    prev = files_by_id.get(sid)
-                    if prev is None or stat.st_mtime >= prev.get("mtime", 0.0):
-                        files_by_id[sid] = {
-                            "id": sid,
-                            "path": str(p),
-                            "mtime": stat.st_mtime,
-                            "size": stat.st_size,
-                        }
-            # The conversation feed reads the first of these with a transcript,
-            # so the order has to be when each session last moved.
-            for info in files_by_id.values():
-                info["mtime"] = _session_last_active(info, agent)
-            # Preserve task-meta order (history of who-was-spawned-when)
-            # but enrich with on-disk info.
-            ordered = []
-            seen: set[str] = set()
-            for sid in meta.claude_session_ids:
-                if sid in files_by_id:
-                    ordered.append(files_by_id[sid])
-                else:
-                    ordered.append({"id": sid, "path": "", "mtime": 0.0, "size": 0})
-                seen.add(sid)
-            for sid, info in files_by_id.items():
-                if sid not in seen:
-                    ordered.append(info)
-            ordered.sort(key=lambda x: x.get("mtime", 0.0), reverse=True)
+            ordered = _task_session_infos(root, slug, meta)
             live = claude_registry.session_status(
                 project_id, slug, agent, meta.tmux_interview_target or ""
             )
+            context = claude_registry.context_status(root, slug)
             return {
                 "agent": agent,
                 "agent_label": agent_label(agent),
                 "tracked": [sid for sid in meta.claude_session_ids],
                 "sessions": ordered,
+                "context": context,
                 "tmux_alive": live["tmux_alive"],
                 "pane_command": live["pane_command"],
                 "agent_running": live["agent_running"],
                 "tmux_session": live["session"],
                 "tmux_target": meta.tmux_interview_target or "",
-                "claude_cwd": str(cwd),
+                "claude_cwd": str(_task_pane_cwd(root, slug, meta)),
             }
 
         def do_GET(self) -> None:  # noqa: N802
@@ -2679,6 +2921,45 @@ def make_handler(
                 self._send(st, b, h)
                 return
 
+            m_rotate = re.match(r"^/api/tasks/([^/]+)/claude/rotate$", path)
+            if m_rotate:
+                root, project_id = self._resolve_scope(parsed)
+                if root is None or project_id is None:
+                    self._bad_project()
+                    return
+                slug = m_rotate.group(1)
+                if not _SLUG_RE.match(slug) or not read_meta(root, slug):
+                    st, b, h = _json_bytes({"error": "task not found"}, 404)
+                    self._send(st, b, h)
+                    return
+                result = claude_registry.rotate(
+                    root,
+                    project_id,
+                    slug,
+                    default_skills=default_skills,
+                )
+                if result.get("ok") and bool(body.get("paste_prompt", True)):
+                    target = str(result.get("target") or "")
+                    claude_registry.wait_until_ready(target, timeout=30.0)
+                    pasted = claude_registry.paste_handoff_prompt(
+                        root,
+                        project_id,
+                        slug,
+                        default_skills=default_skills,
+                    )
+                    if not pasted.get("ok"):
+                        result = pasted
+                    else:
+                        result.update(pasted)
+                        result["rotated"] = True
+                st, b, h = (
+                    _json_bytes(result)
+                    if result.get("ok")
+                    else _json_bytes(result, 400)
+                )
+                self._send(st, b, h)
+                return
+
             m_mon_post = re.match(r"^/api/tasks/([^/]+)/monitor$", path)
             if m_mon_post:
                 root, project_id = self._resolve_scope(parsed)
@@ -3011,6 +3292,38 @@ def make_handler(
                     self._send(st, b, h)
                     return
                 submit = bool(body.get("submit", True))
+                context = claude_registry.context_status(root, slug)
+                if submit and context.get("over_budget"):
+                    if bool(body.get("rotate_context", False)):
+                        result = claude_registry.rotate_and_send(
+                            root,
+                            project_id,
+                            slug,
+                            text,
+                            default_skills=default_skills,
+                        )
+                        st, b, h = (
+                            _json_bytes(result)
+                            if result.get("ok")
+                            else _json_bytes(result, 400)
+                        )
+                        self._send(st, b, h)
+                        return
+                    st, b, h = _json_bytes(
+                        {
+                            "ok": False,
+                            "code": "context_budget_exceeded",
+                            "error": (
+                                "This conversation reached Loom's context budget. "
+                                "Rotate to a fresh session before sending to avoid "
+                                "another oversized request."
+                            ),
+                            "context": context,
+                        },
+                        409,
+                    )
+                    self._send(st, b, h)
+                    return
                 ok, msg = send_pane_text(target, text, submit=submit)
                 print(
                     f"[web] inbound claude/send slug={slug} ok={ok} chars={len(text)}",
@@ -3285,7 +3598,13 @@ def make_handler(
                     st, b, h = _json_bytes({"error": "invalid session_id"}, 400)
                     self._send(st, b, h)
                     return
-                result = claude_registry.start(root, project_id, slug, resume_session_id=sid)
+                result = claude_registry.start(
+                    root,
+                    project_id,
+                    slug,
+                    resume_session_id=sid,
+                    allow_oversize_resume=bool(body.get("allow_oversize", False)),
+                )
                 print(
                     f"[web] resume claude slug={slug} session={sid} ok={bool(result.get('ok'))} "
                     f"target={result.get('target', '')}",
@@ -3298,10 +3617,13 @@ def make_handler(
                     task_slug=slug,
                     data={**result, "session_id": sid},
                 )
+                error_status = (
+                    409 if result.get("code") == "context_budget_exceeded" else 400
+                )
                 st, b, h = (
                     _json_bytes(result)
                     if result.get("ok")
-                    else _json_bytes(result, 400)
+                    else _json_bytes(result, error_status)
                 )
                 self._send(st, b, h)
                 return
@@ -3660,7 +3982,20 @@ def serve(
     if _reaped:
         print(f"  Reaped {_reaped} orphaned web-terminal attach(es)", flush=True)
     sk = default_skills if default_skills.is_file() else bundled_skills_path().resolve()
-    activity_watcher = AgentActivityWatcher(web_project_registry)
+    def _budget_rotate(project: Path, project_id: str, slug: str) -> dict[str, Any]:
+        return claude_registry.rotate_and_send(
+            project,
+            project_id,
+            slug,
+            "",
+            default_skills=sk,
+        )
+
+    activity_watcher = AgentActivityWatcher(
+        web_project_registry,
+        openclaw_client,
+        budget_rotate=_budget_rotate,
+    )
     activity_watcher.start()
     # Agents that support a stop hook report their own completion, which beats
     # watching their pane for it. The watcher above stays as the fallback for

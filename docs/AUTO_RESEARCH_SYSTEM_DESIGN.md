@@ -105,7 +105,7 @@ flowchart TB
 
 每一轮（round N）内部的固定节拍：
 
-1. **Author Agent**（Cursor Agent，当前默认 `gpt-5.6-sol-max-fast`，常驻 tmux，
+1. **Author Agent**（Cursor Agent，当前默认 `grok-4.7-high-fast`，常驻 tmux，
    工作在自己的 worktree）收到本轮 Prompt：
    上一轮的评审报告 + 方法论技能（AR-AUTHOR）+ 图片技能菜单 + GPU 集群使用规范。
    它做实验（读取 GPU Scout 后直接 SSH 到空闲 H100）、改论文、重编译，

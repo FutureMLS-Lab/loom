@@ -287,6 +287,97 @@ def test_list_session_files_returns_jsonl_sorted(tmp_path: Path, monkeypatch) ->
     assert session_id_from_path(files[-1], "claude") == "cccc-dddd"
 
 
+def test_cursor_session_usage_prefers_transcript_over_artifact_store(
+    tmp_path: Path, monkeypatch
+) -> None:
+    fake_home = tmp_path / "home"
+    monkeypatch.setattr(rud_task.Path, "home", classmethod(lambda cls: fake_home))
+    monkeypatch.setenv("LOOM_SESSION_CONTEXT_BUDGET_MB", "1")
+    cwd = tmp_path / "work"
+    cwd.mkdir()
+    chat = fake_home / ".cursor" / "chats" / "workspace" / "chat-1"
+    chat.mkdir(parents=True)
+    meta = chat / "meta.json"
+    meta.write_text('{"cwd": "' + str(cwd.resolve()) + '"}', encoding="utf-8")
+    # The content-addressed store can be much larger than the chat because it
+    # contains file snapshots. It must never drive the context guard.
+    (chat / "store.db").write_bytes(b"x" * (2 * 1024 * 1024))
+    transcript = (
+        fake_home
+        / ".cursor"
+        / "projects"
+        / "encoded-workspace"
+        / "agent-transcripts"
+        / "chat-1"
+        / "chat-1.jsonl"
+    )
+    transcript.parent.mkdir(parents=True)
+    transcript.write_bytes(b"y" * (1024 * 1024 + 1))
+
+    files = list_session_files(cwd, "cursor")
+    assert files == [meta]
+    usage = rud_task.session_usage(meta, "cursor")
+    assert usage["size"] == 1024 * 1024 + 1
+    assert usage["estimated_tokens"] == (usage["size"] + 3) // 4
+    assert usage["over_budget"] is True
+    assert usage["measurement_source"] == "cursor_transcript"
+
+
+def test_cursor_session_usage_warns_before_hard_budget(
+    tmp_path: Path, monkeypatch
+) -> None:
+    monkeypatch.setenv("LOOM_SESSION_CONTEXT_WARNING_MB", "1")
+    monkeypatch.setenv("LOOM_SESSION_CONTEXT_BUDGET_MB", "2")
+    transcript = tmp_path / "chat-2.jsonl"
+    transcript.write_bytes(b"x" * (1024 * 1024 + 1))
+
+    usage = rud_task.session_usage(transcript, "cursor")
+    assert usage["near_budget"] is True
+    assert usage["over_budget"] is False
+
+
+def test_cursor_meta_without_transcript_does_not_false_positive(
+    tmp_path: Path, monkeypatch
+) -> None:
+    fake_home = tmp_path / "home"
+    monkeypatch.setattr(rud_task.Path, "home", classmethod(lambda cls: fake_home))
+    monkeypatch.setenv("LOOM_SESSION_CONTEXT_BUDGET_MB", "0.25")
+    chat = fake_home / ".cursor" / "chats" / "workspace" / "new-chat"
+    chat.mkdir(parents=True)
+    meta = chat / "meta.json"
+    meta.write_text("{}", encoding="utf-8")
+    (chat / "store.db").write_bytes(b"x" * (2 * 1024 * 1024))
+
+    usage = rud_task.session_usage(meta, "cursor")
+
+    assert usage["size"] == 0
+    assert usage["measurement_reliable"] is False
+    assert usage["over_budget"] is False
+
+
+def test_cursor_legacy_transcript_is_discovered(tmp_path: Path, monkeypatch) -> None:
+    fake_home = tmp_path / "home"
+    monkeypatch.setattr(rud_task.Path, "home", classmethod(lambda cls: fake_home))
+    cwd = tmp_path / "legacy" / "work"
+    cwd.mkdir(parents=True)
+    encoded = str(cwd.resolve()).lstrip("/").replace("/", "-")
+    sid = "11111111-2222-3333-4444-555555555555"
+    transcript = (
+        fake_home
+        / ".cursor"
+        / "projects"
+        / encoded
+        / "agent-transcripts"
+        / sid
+        / f"{sid}.jsonl"
+    )
+    transcript.parent.mkdir(parents=True)
+    transcript.write_text("{}\n", encoding="utf-8")
+
+    assert list_session_files(cwd, "cursor") == [transcript]
+    assert session_id_from_path(transcript, "cursor") == sid
+
+
 # --- worktree helpers (real git) --------------------------------------------
 
 
@@ -636,8 +727,8 @@ def test_normalize_and_label_agent() -> None:
     assert agent_label("nonsense") == "Agent"
 
 
-def test_cursor_defaults_to_max_fast_model(tmp_path: Path) -> None:
-    expected = "gpt-5.6-sol-max-fast"
+def test_cursor_defaults_to_fast_iteration_model(tmp_path: Path) -> None:
+    expected = "grok-4.7-high-fast"
     assert rud_task.agent_default_model("cursor") == expected
     meta = create_task(
         tmp_path,
@@ -653,7 +744,7 @@ def test_cursor_defaults_to_max_fast_model(tmp_path: Path) -> None:
 def test_build_agent_command_cursor() -> None:
     from loom.rud_task import agent_default_model, build_agent_command
 
-    default_cmd = ["agent", "-f", "--model", "gpt-5.6-sol-max-fast"]
+    default_cmd = ["agent", "-f", "--model", "grok-4.7-high-fast"]
     assert build_agent_command("cursor") == default_cmd
     assert build_agent_command(
         "cursor", model=agent_default_model("cursor")
@@ -663,7 +754,7 @@ def test_build_agent_command_cursor() -> None:
         "agent",
         "-f",
         "--model",
-        "gpt-5.6-sol-max-fast",
+        "grok-4.7-high-fast",
         "--resume",
         "abc-123",
     ]
@@ -682,10 +773,7 @@ def test_cursor_models_prefer_available_fast_sibling(
             {"id": "claude-fable-5-thinking-max", "label": ""},
         ),
     )
-    assert (
-        rud_task.prefer_cursor_fast_model("cursor-grok-4.5-high")
-        == "cursor-grok-4.5-high-fast"
-    )
+    assert rud_task.prefer_cursor_fast_model("cursor-grok-4.5-high") == "cursor-grok-4.5-high-fast"
     assert rud_task.build_agent_command(
         "cursor",
         model="cursor-grok-4.5-high",
@@ -710,19 +798,22 @@ def test_cursor_models_prefer_available_fast_sibling(
 
 
 
-def test_build_agent_command_claude() -> None:
+def test_build_agent_command_claude(monkeypatch) -> None:
     from loom.rud_task import build_agent_command
 
     cmd = build_agent_command("claude")
     assert cmd[0] == "claude"
     assert "--model" in cmd
     assert "--dangerously-skip-permissions" in cmd
-    assert "--effort" in cmd and "max" in cmd
+    assert cmd[cmd.index("--effort") + 1] == "max"
     assert "--resume" not in cmd
 
     cmd_resume = build_agent_command("claude", model="m1", resume_session_id="abc-123")
     assert cmd_resume[cmd_resume.index("--model") + 1] == "m1"
     assert cmd_resume[cmd_resume.index("--resume") + 1] == "abc-123"
+    monkeypatch.setenv("LOOM_CLAUDE_EFFORT", "medium")
+    configured = build_agent_command("claude")
+    assert configured[configured.index("--effort") + 1] == "medium"
 
 
 def test_build_agent_command_codex() -> None:
@@ -906,19 +997,24 @@ def test_read_meta_upgrades_legacy_default_model(tmp_path: Path) -> None:
     assert read_meta(tmp_path, meta.slug).interview_model == "claude-fable-5"
 
 
-def test_read_meta_upgrades_legacy_cursor_defaults_to_fast(tmp_path: Path) -> None:
-    """Old default selections migrate to the current Fast default."""
+def test_read_meta_upgrades_legacy_cursor_defaults_to_fast(
+    tmp_path: Path,
+) -> None:
+    """Old max model spellings migrate to the fast iteration default."""
     import json as _json
 
     meta = create_task(tmp_path, "bad cursor default", "g", skills_path=None, auto_worktree=False)
     tj = task_root(tmp_path, meta.slug) / "task.json"
     data = _json.loads(tj.read_text())
     data["agent"] = "cursor"
-    for legacy in ("gpt-5.6-sol-max", "gpt-5.6-sol-max[context=1m]"):
+    for legacy in (
+        "gpt-5.6-sol-max",
+        "gpt-5.6-sol-max[context=1m]",
+        "gpt-5.6-sol-max-fast",
+    ):
         data["interview_model"] = legacy
         tj.write_text(_json.dumps(data, indent=2))
-        assert read_meta(tmp_path, meta.slug).interview_model == "gpt-5.6-sol-max-fast"
-
+        assert read_meta(tmp_path, meta.slug).interview_model == rud_task.CURSOR_DEFAULT_MODEL
 
 def test_worktree_inherits_agent_config_by_symlink(tmp_path: Path) -> None:
     """A fresh worktree gets the source repo's untracked .claude skills via
