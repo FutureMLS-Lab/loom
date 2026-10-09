@@ -3904,7 +3904,7 @@ ROLE_SKILLS = (
     (
         SKILL_RESULTS_REPORTING,
         "Author",
-        "Standardizes result-table statistics and manuscript-safe provenance.",
+        "Enforces point-estimate-only result tables and manuscript-safe provenance.",
         "Injected in full into every author prompt.",
     ),
     (
@@ -4288,6 +4288,17 @@ The idea this paper must establish:
 Run the experiments first, then fold the real numbers into the paper, then
 rebuild the PDF. Never write a number an experiment did not produce.
 
+Table reporting policy: every experimental-results table, including main,
+ablation, appendix, supplement, and aggregator-generated tables, must show
+point estimates only. Do not include confidence intervals, standard
+deviations, standard errors, error bars, or other uncertainty/spread in table
+cells or captions, including forms such as `mean +/- value`, `mean ± value`,
+`value (value)`, or `value [low, high]`. If an experiment reports these, keep
+the measured point estimate and omit only the uncertainty field; do not change
+the estimate or fabricate a replacement. Captions and experimental-setup text
+may state the number of seeds and evaluation protocol, but must not print the
+omitted uncertainty statistic.
+
 Evidence placement and focus - this is where revised papers quietly rot:
 - The MAIN BODY carries the story. Headline results, their tables and their
   figures stay in the main sections; the appendix holds only what a reader
@@ -4310,6 +4321,11 @@ the paper is a complete, ready-to-submit artifact. Every \\ARTODO, \\ARnum,
 citation/reference, build error, and empty core section must be gone from both
 the sources and the rendered PDF. The experiments section must contain real
 measured results and the bibliography must go beyond the template seeds.
+
+Before writing the completion note, audit every experimental `table`/`table*`
+environment and every generated table input: displayed data must contain point
+estimates only, with no confidence intervals, standard deviations, standard
+errors, error bars, or other uncertainty/spread notation.
 
 When the round is finished, write your summary to:
 {note}
@@ -4387,12 +4403,14 @@ Before signalling completion again, make the whole submission complete:
 3. Finish every core section: abstract, introduction, related work, method,
    experiments and conclusion.
 4. Include real measured results, required baselines, ablations, analysis,
-   seeds/variance where applicable, and cost measurements.
-5. Ensure every \\includegraphics target exists and every figure/table is
+   seed coverage where applicable, and cost measurements.
+5. Audit every experimental table and generated table input: show one measured
+   point estimate per metric cell, with no uncertainty/spread in cells or captions.
+6. Ensure every \\includegraphics target exists and every figure/table is
    readable in the compiled PDF.
-6. Resolve every citation, reference and label warning.
-7. Expand the bibliography beyond the three template seed entries.
-8. Run latexmk until it exits cleanly, inspect every PDF page, and stay within
+7. Resolve every citation, reference and label warning.
+8. Expand the bibliography beyond the three template seed entries.
+9. Run latexmk until it exits cleanly, inspect every PDF page, and stay within
    the venue page allowance.
 
 Do not ask the reviewers to evaluate unfinished work. When and only when every

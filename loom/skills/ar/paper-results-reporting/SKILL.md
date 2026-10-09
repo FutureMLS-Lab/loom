@@ -1,6 +1,6 @@
 ---
 name: paper-results-reporting
-description: Standardize venue-independent, evidence-backed result tables, main-paper interval placement, provenance hygiene, and final submission-artifact naming. Use for any paper when reporting multi-seed experiments, keeping numeric interval endpoints out of the abstract, body, and main tables, formatting mean plus-or-minus sample standard deviation, removing machine hashes from manuscripts, naming a final PDF by submission ID, or validating statistical tables.
+description: Standardize venue-independent, evidence-backed point-estimate-only result tables, main-paper interval placement, provenance hygiene, and final submission-artifact naming. Use for any paper when reporting experimental results, keeping uncertainty and numeric interval endpoints out of manuscript-facing tables, removing machine hashes from manuscripts, naming a final PDF by submission ID, or validating statistical tables.
 ---
 
 # Paper Results Reporting
@@ -17,51 +17,55 @@ hygiene, and the cross-venue final-PDF naming convention. It does not define
 page limits, templates, ethical-section placement, appendix policy, or other
 conference rules. Apply a separate venue skill for venue-specific packaging.
 
-## Statistical table rule
+## Point-estimate-only table rule
 
-For stochastic experimental measurements, report:
+Every experimental-results table reports:
 
 ```text
-mean ± sample standard deviation
+one measured point estimate per metric cell
 ```
 
-The replicate unit must be the independent final training seed or independent
-final run. First aggregate evaluation examples within each replicate, then
-compute the sample standard deviation across replicate-level values:
+This applies to main results, ablations, appendix and supplementary result
+tables, and tables copied from experiment aggregators. Do not append confidence
+intervals, standard deviations, standard errors, error bars, or any other
+uncertainty or spread statistic to table cells or captions. Forbidden display
+forms include `mean +/- value`, `mean ± value`, `value (value)`, interval
+notation, and separate uncertainty columns.
+
+For multi-seed or multi-run measurements, use the protocol-defined point
+estimate, normally the arithmetic mean across independent final seeds or runs.
+First aggregate evaluation examples within each replicate, then aggregate the
+replicate-level values:
 
 ```python
-from statistics import stdev
-
 mean = sum(per_seed) / len(per_seed)
-sd = stdev(per_seed)  # denominator n - 1
 ```
 
-Every affected caption states `mean ± sample SD over N independent seeds`
-(or runs) and names a different replicate unit when applicable.
+Captions or experimental-setup text may state the number of independent seeds
+or runs and the evaluation protocol, but must not print the omitted uncertainty
+statistic.
 
 ### Hard constraints
 
 - Read the actual per-seed/per-run values from raw results or a
   completion-verified aggregate.
-- Never infer a standard deviation from confidence-interval endpoints.
-- Never invent dispersion or silently substitute standard error.
-- With fewer than two independent replicates, do not print a fake `± 0`.
-  Run another replicate or report the scalar and disclose the limitation.
+- If an aggregate contains a point estimate plus uncertainty, retain the
+  measured point estimate and omit only the uncertainty field.
+- Never infer a replacement point estimate from interval endpoints.
+- Never alter or invent a point estimate to make a table look complete.
 - Preserve failed and censored runs according to the frozen protocol.
 - Do not mix runs, configurations, checkpoints, or aggregate revisions.
 - Round only for display; compute from full-precision replicate values.
+- Keep per-seed values, confidence intervals, standard deviations, standard
+  errors, and other analysis fields in machine-readable experiment artifacts.
+- Update the source exporter as well as generated tables so rebuilding cannot
+  restore uncertainty notation.
 
-### Values that do not receive a standard deviation
-
-Do not append `±` to deterministic metadata such as dataset size, parameter
-count, beam width, budget, fixed hyperparameters, theoretical constants, or
-event counts. A genuinely seed-independent exact quantity may be shown as
-`± 0.00` only when that convention is scientifically useful and the caption
-explicitly says why it is zero.
-
-Mean ± SD is descriptive run-to-run variability, not an inferential confidence
-interval. It may remain in stochastic main-table cells under this rule, but it
-must never be described as a confidence interval.
+Deterministic metadata such as dataset size, parameter count, beam width,
+budget, fixed hyperparameters, theoretical constants, and event counts also
+remain scalar. The table rule governs manuscript presentation, not the
+underlying statistical analysis or the uncertainty visualizations defined by a
+relevant figure skill.
 
 ## Main-paper interval-placement rule
 
@@ -72,9 +76,9 @@ and min--max intervals written as `[lower, upper]`, `(lower, upper)`, or an
 estimate followed by an endpoint pair.
 
 - Report the point estimate, normally the mean, in the abstract and body prose.
-- In main-paper tables, keep stochastic cells as `mean ± sample SD` when the
-  statistical table rule applies. Sample SD is a dispersion summary, not a pair
-  of interval endpoints. Do not add CI columns or endpoint pairs to those cells.
+- In every manuscript-facing result table, keep only one measured point
+  estimate per metric cell. Do not add CI, SD, SE, min--max, or other
+  uncertainty/spread columns or notation.
 - Describe inferential outcomes qualitatively when needed, for example that a
   comparison remains unresolved or that a paired difference stays positive
   under resampling, without printing endpoint values.
@@ -82,9 +86,10 @@ estimate followed by an endpoint pair.
   or shaded bands may remain only when their caption defines the statistic
   without giving numeric endpoints.
 - Put full interval methodology, endpoint values, per-replicate records, and
-  additional uncertainty analysis in appendix experiment details. If the venue
-  cannot accept an appendix, preserve them in a separate experiment-details
-  artifact rather than the main PDF.
+  additional uncertainty analysis in appendix prose or experiment details, not
+  in result-table cells or captions. If the venue cannot accept an appendix,
+  preserve them in a separate experiment-details artifact rather than the main
+  PDF.
 - Preserve CI, SD, and SE fields in machine-readable results even when the main
   paper displays only the permitted summary.
 
@@ -94,20 +99,19 @@ so rebuilding cannot restore forbidden intervals.
 ## Reproducible export
 
 1. Identify the unique aggregate and completion manifest behind each table.
-2. Add mean and sample-SD fields or LaTeX macros to the aggregator/exporter.
+2. Select the measured point-estimate field used by the frozen protocol.
 3. Regenerate the table source; do not hand-copy numbers into multiple files.
-4. Keep CI fields for appendix experiment details and machine-readable audits,
-   not for numeric endpoint display in the main paper.
+4. Keep CI, SD, SE, and per-replicate fields for experiment details and
+   machine-readable audits, not for display in result-table cells or captions.
 5. Record the aggregate revision and input artifacts in experiment details.
 
 Recommended LaTeX:
 
 ```latex
-\newcommand{\SDcell}[2]{\ensuremath{#1 \mathbin{\pm} #2}}
+\newcommand{\ResultCell}[1]{\ensuremath{#1}}
 ```
 
-Use one consistent precision per metric family. A displayed mean and SD should
-normally use the same number of decimal places.
+Use one consistent precision per metric family.
 
 ## Provenance belongs outside the rendered paper
 
@@ -180,10 +184,11 @@ Before declaring a paper ready:
 - enumerate every table appearing in the compiled main PDF;
 - classify each numeric field as stochastic measurement or deterministic
   metadata;
-- recompute sampled table cells from replicate arrays and compare after
+- recompute sampled point estimates from replicate arrays and compare after
   rounding;
-- confirm every stochastic result cell uses `mean ± sample SD` and every
-  caption names `N` and the replicate unit;
+- confirm every result cell contains one measured point estimate and that no
+  result-table cell or caption contains CI, SD, SE, error-bar, interval, or
+  other uncertainty/spread notation;
 - reject numeric interval endpoints in the main-paper abstract, body prose,
   tables, captions, and figure labels; verify moved interval details are in an
   appendix experiment-details section or separate experiment-details artifact;
@@ -197,4 +202,4 @@ Before declaring a paper ready:
 - visually inspect every table for clipping, overlap, and unreadable type.
 
 Report deterministic fields that intentionally remain scalar. “Every number
-has ±” is not a valid acceptance criterion if it fabricates uncertainty.
+needs an uncertainty companion” is not a valid acceptance criterion.

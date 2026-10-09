@@ -131,9 +131,11 @@ class TestSkillCatalog:
         assert reporting["name"] == "paper-results-reporting"
         assert reporting["role"] == "Author"
         body = ar.skill_body(ar.SKILL_RESULTS_REPORTING)
-        assert "sample standard deviation" in body
+        assert "Point-estimate-only table rule" in body
+        assert "one measured point estimate per metric cell" in body
+        assert "Do not append confidence" in body
         assert "Main-paper interval-placement rule" in body
-        assert "appendix experiment details" in body
+        assert "appendix prose or experiment details" in body
         assert "main-paper-<submission-ID>.pdf" in body
         assert "never leave both files" in body
 
@@ -148,7 +150,7 @@ class TestSkillCatalog:
         body = ar.skill_body(ar.SKILL_WSDM_SUBMISSION)
         assert "nine-page technical-content boundary" in body
         assert "point estimate (mean) only" in body
-        assert "Stochastic main-table cells" in body
+        assert "measured point estimate per metric cell" in body
         assert "no numeric interval endpoints" in body
         assert "appendix experiment details" in body
 
@@ -1226,9 +1228,12 @@ def test_seed_paper_skeleton(tmp_path: Path, venue: str) -> None:
     assert (dest / "figures").is_dir()
 
     main = (dest / "main.tex").read_text(encoding="utf-8")
+    experiments = (dest / "sections" / "04_experiments.tex").read_text(encoding="utf-8")
     assert ar.TOKEN_TITLE not in main
     assert ar.TOKEN_RUNNING_TITLE not in main
     assert ar.TOKEN_KEYWORDS not in main
+    assert "Point estimates over N independent seeds" in experiments
+    assert "standard deviation in parentheses" not in experiments
     # LaTeX specials in the idea title must not break the build.
     assert r"50\% Faster \& Better" in main
 
@@ -1698,10 +1703,12 @@ def test_author_prompts_inject_results_reporting(tmp_path: Path) -> None:
     )
     for prompt in prompts:
         assert "Results reporting and provenance" in prompt
-        assert "mean ± sample standard deviation" in prompt
+        assert "Point-estimate-only table rule" in prompt
+        assert "one measured point estimate per metric cell" in prompt
+        assert "Do not append confidence intervals" in prompt
         assert "EXPERIMENT_DETAILS.md" in prompt
         assert "Main-paper interval-placement rule" in prompt
-        assert "appendix experiment details" in prompt
+        assert "appendix prose or experiment details" in prompt
         assert "main-paper-<submission-ID>.pdf" in prompt
         assert "WSDM submission requirements" not in prompt
         assert "WACV submission requirements" not in prompt
@@ -1812,6 +1819,12 @@ def test_author_prompts_carry_the_contract(tmp_path: Path) -> None:
     assert str(ar.author_note_path_for(task_dir, 3)) in rnd
     assert "hard review-readiness gate" in rnd
     assert "ready-to-submit artifact" in rnd
+    assert "Table reporting policy" in rnd
+    assert "point estimates only" in rnd
+    assert "confidence intervals" in rnd
+    assert "standard deviations" in rnd
+    assert "standard errors" in rnd
+    assert "audit every experimental `table`/`table*`" in rnd
 
     first = ar.author_round_prompt(task_dir, paper_dir, state, 1)
     assert "no reviewer report yet" in first

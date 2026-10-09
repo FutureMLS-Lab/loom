@@ -9,7 +9,7 @@ description: Prepare and validate WSDM submissions in anonymous ACM proceedings 
 
 This is a WSDM-only venue skill. Do not apply its template or page-boundary
 rules to another conference. Use `paper-results-reporting` separately for
-statistical tables and provenance.
+point-estimate-only tables and provenance.
 
 Rules can change between WSDM cycles. Check the official call for papers before
 final delivery. For WSDM 2027, use the verified rules below unless the official
@@ -37,10 +37,12 @@ body ends, where Ethical Considerations begins, and where References begins.
 ## WSDM result-display policy
 
 Apply the general `paper-results-reporting` interval-placement rule to the
-abstract, body, tables, captions, and figure labels. Stochastic main-table cells
-remain `mean ± sample SD`, with the replicate unit and count defined in the
-caption, but they must not add confidence-interval columns or endpoint pairs.
-Do not remove table dispersion merely to eliminate interval endpoints.
+abstract, body, tables, captions, and figure labels. Every experimental-results
+table, including appendix and aggregator-generated tables, must show one
+measured point estimate per metric cell. Do not print confidence intervals,
+standard deviations, standard errors, error bars, or other uncertainty/spread
+in table cells or captions. A caption may state the replicate unit and count
+without printing the omitted uncertainty statistic.
 
 In WSDM narrative prose, report the point estimate (mean) only. This applies to
 every numerical experimental result in the abstract, introduction, method,
@@ -122,8 +124,9 @@ demographic, causal, privacy, or safety evidence was measured.
 6. Confirm Ethical Considerations begins only after the technical boundary and
    References follows it.
 7. Confirm the abstract, body prose, main tables, captions, and figure labels
-   contain no numeric interval endpoints; stochastic table cells may retain
-   `mean ± sample SD`.
+   contain no numeric interval endpoints, and every experimental-results table
+   contains point estimates only with no uncertainty/spread in cells or
+   captions.
 8. Scan the rendered PDF for identity leaks, local paths, internal hashes,
    placeholders, stale venue names, and old template text.
 9. Visually inspect all nine technical pages plus the ethics/reference pages.
